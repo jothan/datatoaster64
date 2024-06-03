@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+datatoaster-core = { path = "datatoaster-core" }
+datatoaster-fuse = { path = "datatoaster-fuse" }
+datatoaster-traits = { path = "datatoaster-traits" }
+
+[workspace]
+members = ["datatoaster-core", "datatoaster-fuse", "datatoaster-traits"]
