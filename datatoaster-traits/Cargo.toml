@@ -2,6 +2,7 @@
 name = "datatoaster-traits"
 publish = false
 version.workspace = true
+edition = "2021"
 
 [features]
 default = []

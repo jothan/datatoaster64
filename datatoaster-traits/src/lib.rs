@@ -7,6 +7,7 @@ use std::mem::MaybeUninit;
 
 pub type BlockIndex = u64;
 
+#[derive(Debug)]
 pub enum Error {
     General,
     IO,

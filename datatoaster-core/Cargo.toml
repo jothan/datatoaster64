@@ -2,11 +2,12 @@
 name = "datatoaster-core"
 publish = false
 version.workspace = true
+edition = "2021"
 
 [features]
 default = []
 std = ["no-std-compat/std"]
 
 [dependencies]
-no-std-compat = "0.4"
+no-std-compat = { version = "0.4", features = ["alloc"] }
 datatoaster-traits = { path = "../datatoaster-traits" }
