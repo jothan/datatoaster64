@@ -1,14 +1,25 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
+#![no_std]
+
+extern crate no_std_compat as std;
+use std::prelude::v1::*;
+
+use std::mem::MaybeUninit;
+
+pub type BlockIndex = u64;
+
+pub enum Error {
+    General,
+    IO,
+    Invalid,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub trait BlockAccess<const BLOCK_SIZE: usize> {
+    fn read(
+        &self,
+        block_idx: BlockIndex,
+        buffer: &mut [MaybeUninit<u8>; BLOCK_SIZE],
+    ) -> Result<(), Error>;
+    fn write(&self, block_idx: BlockIndex, buffer: &[u8; BLOCK_SIZE]) -> Result<(), Error>;
+    /// Returns the size of the device in blocks, must be constant.
+    fn device_size(&self) -> Result<BlockIndex, Error>;
 }

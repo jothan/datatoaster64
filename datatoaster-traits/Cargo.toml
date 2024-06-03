@@ -1,6 +1,11 @@
 [package]
 name = "datatoaster-traits"
-version = "0.1.0"
-edition = "2021"
+publish = false
+version.workspace = true
+
+[features]
+default = []
+std = [ "no-std-compat/std" ]
 
 [dependencies]
+no-std-compat = "0.4"

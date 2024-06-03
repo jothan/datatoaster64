@@ -1,3 +1,8 @@
+#![no_std]
+
+extern crate no_std_compat as std;
+use std::prelude::v1::*;
+
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }

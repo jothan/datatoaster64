@@ -1,5 +1,8 @@
 [package]
 name = "datatoaster64"
+publish = false
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
 
