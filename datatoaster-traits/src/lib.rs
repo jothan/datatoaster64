@@ -15,7 +15,8 @@ pub enum Error {
     Invalid,
 }
 
-pub trait BlockAccess<const BLOCK_SIZE: usize> {
+pub unsafe trait BlockAccess<const BLOCK_SIZE: usize> {
+    /// Safety: This function must completely initialize the buffer.
     fn read(
         &self,
         block_idx: BlockIndex,

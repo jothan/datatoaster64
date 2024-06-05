@@ -5,7 +5,7 @@ struct DummyDevice;
 
 const BLOCK_SIZE: usize = 4096;
 
-impl BlockAccess<4096> for DummyDevice {
+unsafe impl BlockAccess<4096> for DummyDevice {
     fn read(
         &self,
         _block_idx: datatoaster_traits::BlockIndex,

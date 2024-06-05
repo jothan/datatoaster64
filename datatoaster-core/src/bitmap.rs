@@ -222,7 +222,7 @@ mod tests {
         size: u64,
     }
 
-    impl BlockAccess<BLOCK_SIZE> for DummyDevice {
+    unsafe impl BlockAccess<BLOCK_SIZE> for DummyDevice {
         fn read(
             &self,
             _block_idx: BlockIndex,
