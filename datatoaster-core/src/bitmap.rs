@@ -2,6 +2,7 @@ use std::prelude::v1::*;
 
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::mem::MaybeUninit;
+use std::num::NonZeroU64;
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
@@ -79,7 +80,7 @@ impl BitmapBitIndex {
     }
 
     fn into_data_block_index(self, layout: &DeviceLayout) -> Option<DataBlockIndex> {
-        let index = DataBlockIndex(self.0 + layout.data_blocks.start.0);
+        let index = DataBlockIndex(NonZeroU64::new(self.0 + layout.data_blocks.start.0)?);
 
         if layout.data_blocks.contains(&index.into()) {
             Some(index)

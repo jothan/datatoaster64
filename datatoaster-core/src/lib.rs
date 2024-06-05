@@ -2,6 +2,7 @@
 #![feature(array_chunks)]
 extern crate no_std_compat as std;
 
+use core::num::NonZeroU64;
 use std::prelude::v1::*;
 
 use std::ops::Range;
@@ -12,6 +13,8 @@ use spin::lock_api::Mutex;
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 pub mod bitmap;
+pub mod inode;
+
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -33,17 +36,20 @@ impl From<BlockError> for Error {
 
 /// Index into the user data region
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Debug)]
-pub struct DataBlockIndex(u64);
+pub struct DataBlockIndex(NonZeroU64);
+
+unsafe impl bytemuck::ZeroableInOption for DataBlockIndex {}
+unsafe impl bytemuck::PodInOption for DataBlockIndex {}
 
 impl DataBlockIndex {
     fn into_bitmap_bit_index(self, layout: &DeviceLayout) -> BitmapBitIndex {
-        BitmapBitIndex(self.0 - layout.data_blocks.start.0)
+        BitmapBitIndex(self.0.get() - layout.data_blocks.start.0)
     }
 }
 
 impl From<DataBlockIndex> for BlockIndex {
     fn from(value: DataBlockIndex) -> BlockIndex {
-        BlockIndex(value.0)
+        BlockIndex(value.0.get())
     }
 }
 

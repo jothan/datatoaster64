@@ -6,7 +6,7 @@ edition = "2021"
 
 [features]
 default = []
-std = ["no-std-compat/std", "spin/std", "bytemuck/extern_crate_std"]
+std = ["no-std-compat/std", "spin/std", "bytemuck/extern_crate_std", "libc/std"]
 
 [dependencies]
 no-std-compat = { version = "0.4", features = ["alloc"] }
@@ -20,6 +20,10 @@ bytemuck = { version = "1.16.0", features = [
     "const_zeroed",
     "zeroable_atomics",
     "must_cast",
+] }
+libc = { version = "0.2.155", default-features = false, features = [
+    "const-extern-fn",
+    "extra_traits",
 ] }
 
 [lints]
