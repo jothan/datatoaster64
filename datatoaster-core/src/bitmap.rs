@@ -1,13 +1,17 @@
-use core::mem::{self, MaybeUninit};
 use std::prelude::v1::*;
 
-use datatoaster_traits::{BlockAccess, BlockIndex};
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
+use std::mem::MaybeUninit;
+
+use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::{BlockDevice, DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
 
 const BITMAP_SEGMENTS: usize = BLOCK_SIZE / std::mem::size_of::<u64>();
 const BITS_PER_BLOCK: u64 = BLOCK_SIZE as u64 * 8;
+
+#[derive(bytemuck::NoUninit, bytemuck::AnyBitPattern, Clone, Copy)]
+#[repr(transparent)]
 struct BitmapBlock([u64; BITMAP_SEGMENTS]);
 
 #[derive(Default)]
@@ -101,21 +105,13 @@ impl BitmapAllocator {
         block_index: BitmapBlockIndex,
         device: &BlockDevice<D>,
     ) -> Result<BitmapBlock, Error> {
-        let mut buffer = MaybeUninit::uninit();
-        device.inner.read(block_index.into(), &mut buffer)?;
+        let mut block: MaybeUninit<[u64; BITMAP_SEGMENTS]> = MaybeUninit::uninit();
+        let bytes: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { std::mem::transmute(&mut block) };
+        device.inner.read(block_index.into(), bytes)?;
 
-        let buffer = unsafe { buffer.assume_init() };
-        let mut out = [0u64; BITMAP_SEGMENTS];
+        let block = BitmapBlock(unsafe { block.assume_init() });
 
-        assert!(mem::size_of_val(&buffer) == mem::size_of_val(&out));
-        for (input, out) in buffer
-            .array_chunks::<{ mem::size_of::<u64>() }>()
-            .zip(out.iter_mut())
-        {
-            *out = u64::from_le_bytes(*input);
-        }
-
-        Ok(BitmapBlock(out))
+        Ok(block)
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(
@@ -123,18 +119,8 @@ impl BitmapAllocator {
         device: &BlockDevice<D>,
         data: &BitmapBlock,
     ) -> Result<(), Error> {
-        let mut buffer = [0; BLOCK_SIZE];
-
-        assert!(mem::size_of_val(&buffer) == mem::size_of_val(data));
-        for (input, out) in data
-            .0
-            .iter()
-            .zip(buffer.array_chunks_mut::<{ mem::size_of::<u64>() }>())
-        {
-            *out = input.to_le_bytes();
-        }
-
-        device.inner.write(block_index.into(), &buffer)?;
+        let bytes = bytemuck::bytes_of(data).try_into().unwrap();
+        device.inner.write(block_index.into(), bytes)?;
 
         Ok(())
     }

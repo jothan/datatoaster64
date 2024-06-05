@@ -5,9 +5,18 @@ version.workspace = true
 edition = "2021"
 
 [features]
-default = ["std"]
-std = ["no-std-compat/std"]
+default = []
+std = ["no-std-compat/std", "bytemuck/extern_crate_std"]
 
 [dependencies]
 no-std-compat = { version = "0.4", features = ["alloc"] }
 datatoaster-traits = { path = "../datatoaster-traits" }
+bytemuck = { version = "1.16.0", features = [
+    "extern_crate_alloc",
+    "zeroable_maybe_uninit",
+    "min_const_generics",
+    "derive",
+    "const_zeroed",
+    "zeroable_atomics",
+    "must_cast",
+] }
