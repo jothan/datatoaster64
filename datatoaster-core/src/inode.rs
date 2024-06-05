@@ -7,16 +7,16 @@ use crate::{DataBlockIndex, BLOCK_SIZE};
 const NB_DIRECT_BLOCKS: usize = 13;
 pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
 
-#[derive(bytemuck::TransparentWrapper, Clone, Copy)]
+#[derive(bytemuck::TransparentWrapper, Clone, Copy, Debug)]
 #[repr(transparent)]
-struct InodeIndex(NonZeroU64);
+pub(crate) struct InodeIndex(NonZeroU64);
 
 unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug)]
 #[repr(u16)]
-enum InodeType {
+pub(crate) enum InodeType {
     Free = 0,
     Directory = 1,
     File = 2,

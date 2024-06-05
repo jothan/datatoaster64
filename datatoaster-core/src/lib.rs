@@ -13,7 +13,9 @@ use spin::lock_api::Mutex;
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 pub mod bitmap;
+pub mod directory;
 pub mod inode;
+pub mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 use inode::INODES_PER_BLOCK;
@@ -26,6 +28,7 @@ pub enum Error {
     Invalid,
     DeviceBounds,
     OutOfSpace,
+    SuperBlock,
     Block(BlockError),
 }
 
