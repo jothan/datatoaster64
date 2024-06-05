@@ -20,3 +20,6 @@ bytemuck = { version = "1.16.0", features = [
     "zeroable_atomics",
     "must_cast",
 ] }
+
+[lints]
+workspace = true

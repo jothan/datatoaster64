@@ -10,3 +10,6 @@ std = [ "no-std-compat/std" ]
 
 [dependencies]
 no-std-compat = "0.4"
+
+[lints]
+workspace = true

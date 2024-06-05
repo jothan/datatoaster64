@@ -11,5 +11,11 @@ datatoaster-core = { path = "datatoaster-core" }
 datatoaster-fuse = { path = "datatoaster-fuse" }
 datatoaster-traits = { path = "datatoaster-traits" }
 
+[lints]
+workspace = true
+
 [workspace]
 members = ["datatoaster-core", "datatoaster-fuse", "datatoaster-traits"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
