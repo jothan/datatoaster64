@@ -5,7 +5,7 @@ use std::mem::MaybeUninit;
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
-use crate::{BlockDevice, DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
+use crate::{DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
 
 const BITMAP_SEGMENTS: usize = BLOCK_SIZE / std::mem::size_of::<u64>();
 const BITS_PER_BLOCK: u64 = BLOCK_SIZE as u64 * 8;
@@ -24,7 +24,7 @@ impl BitmapBlocks {
     fn get<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
         index: BitmapBlockIndex,
-        device: &BlockDevice<D>,
+        device: &D,
     ) -> Result<&mut BitmapBlock, Error> {
         match self.blocks.entry(index) {
             Entry::Vacant(e) => {
@@ -35,7 +35,7 @@ impl BitmapBlocks {
         }
     }
 
-    fn sync<D: BlockAccess<BLOCK_SIZE>>(&mut self, device: &BlockDevice<D>) -> Result<(), Error> {
+    fn sync<D: BlockAccess<BLOCK_SIZE>>(&mut self, device: &D) -> Result<(), Error> {
         while let Some(block_idx) = self.dirty_blocks.first().copied() {
             let data = self.get(block_idx, device)?;
             BitmapAllocator::write_block(block_idx, device, data)?;
@@ -90,24 +90,21 @@ impl BitmapBitIndex {
 }
 
 impl BitmapAllocator {
-    pub fn new<D: BlockAccess<BLOCK_SIZE>>(device: &BlockDevice<D>) -> Result<Self, Error> {
-        let layout = device.layout().clone();
-        let cursor = BitmapBitIndex(0);
-
-        Ok(Self {
-            layout,
-            cursor,
+    pub fn new<D: BlockAccess<BLOCK_SIZE>>(device: &D, layout: &DeviceLayout) -> Self {
+        Self {
+            layout: layout.clone(),
+            cursor: BitmapBitIndex(0),
             blocks: Default::default(),
-        })
+        }
     }
 
     fn read_block<D: BlockAccess<BLOCK_SIZE>>(
         block_index: BitmapBlockIndex,
-        device: &BlockDevice<D>,
+        device: &D,
     ) -> Result<BitmapBlock, Error> {
         let mut block: MaybeUninit<[u64; BITMAP_SEGMENTS]> = MaybeUninit::uninit();
         let bytes: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { std::mem::transmute(&mut block) };
-        device.inner.read(block_index.into(), bytes)?;
+        device.read(block_index.into(), bytes)?;
 
         let block = BitmapBlock(unsafe { block.assume_init() });
 
@@ -116,11 +113,11 @@ impl BitmapAllocator {
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(
         block_index: BitmapBlockIndex,
-        device: &BlockDevice<D>,
+        device: &D,
         data: &BitmapBlock,
     ) -> Result<(), Error> {
         let bytes = bytemuck::bytes_of(data).try_into().unwrap();
-        device.inner.write(block_index.into(), bytes)?;
+        device.write(block_index.into(), bytes)?;
 
         Ok(())
     }
@@ -137,7 +134,7 @@ impl BitmapAllocator {
     /// Allocate a single block for file or directory data
     pub fn alloc<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
-        device: &BlockDevice<D>,
+        device: &D,
     ) -> Result<DataBlockIndex, Error> {
         let nb_data_blocks =
             BitmapBitIndex(self.layout.data_blocks.end.0 - self.layout.data_blocks.start.0);
@@ -177,7 +174,7 @@ impl BitmapAllocator {
 
     pub fn free<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
-        device: &BlockDevice<D>,
+        device: &D,
         data_index: DataBlockIndex,
     ) -> Result<(), Error> {
         let bit_index = data_index.into_bitmap_bit_index(&self.layout);
@@ -199,10 +196,7 @@ impl BitmapAllocator {
         Ok(())
     }
 
-    pub fn sync<D: BlockAccess<BLOCK_SIZE>>(
-        &mut self,
-        device: &BlockDevice<D>,
-    ) -> Result<(), Error> {
+    pub fn sync<D: BlockAccess<BLOCK_SIZE>>(&mut self, device: &D) -> Result<(), Error> {
         self.blocks.sync(device)
     }
 }
@@ -216,7 +210,7 @@ mod tests {
     use datatoaster_traits::{BlockAccess, BlockIndex};
 
     use super::{BitmapAllocator, BitmapBlockIndex, Error, BLOCK_SIZE};
-    use crate::BlockDevice;
+    use crate::DeviceLayout;
 
     struct DummyDevice {
         size: u64,
@@ -247,12 +241,13 @@ mod tests {
 
     #[test]
     fn fill_device() -> Result<(), Error> {
-        let device = BlockDevice::new(DummyDevice {
+        let device = DummyDevice {
             size: 256 * 1024 * 1024,
-        })?;
-        let mut alloc = BitmapAllocator::new(&device)?;
+        };
+        let layout = DeviceLayout::from_device(&device)?;
+        let mut alloc = BitmapAllocator::new(&device, &layout);
 
-        for _ in 0..(device.layout.data_blocks.end.0 - device.layout.data_blocks.start.0) {
+        for _ in 0..(layout.data_blocks.end.0 - layout.data_blocks.start.0) {
             assert!(alloc.alloc(&device).is_ok());
         }
         assert!(alloc.alloc(&device) == Err(Error::OutOfSpace));
@@ -262,17 +257,18 @@ mod tests {
 
     #[test]
     fn dirty_page() -> Result<(), Error> {
-        let device = BlockDevice::new(DummyDevice {
+        let device = DummyDevice {
             size: 256 * 1024 * 1024,
-        })?;
-        let mut alloc = BitmapAllocator::new(&device)?;
+        };
+        let layout = DeviceLayout::from_device(&device)?;
+        let mut alloc = BitmapAllocator::new(&device, &layout);
         assert!(alloc.blocks.dirty_blocks.len() == 0);
         let data_block = alloc.alloc(&device)?;
         assert!(alloc.blocks.dirty_blocks.len() == 1);
         assert!(alloc
             .blocks
             .dirty_blocks
-            .contains(&BitmapBlockIndex(device.layout.bitmap_blocks.start.0)));
+            .contains(&BitmapBlockIndex(layout.bitmap_blocks.start.0)));
 
         alloc.free(&device, data_block)?;
         assert!(alloc.free(&device, data_block) == Err(Error::Invalid));

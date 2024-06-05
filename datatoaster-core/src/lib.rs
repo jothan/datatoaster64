@@ -5,11 +5,14 @@ extern crate no_std_compat as std;
 use std::prelude::v1::*;
 
 use std::ops::Range;
+use std::sync::Arc;
+
+use spin::lock_api::Mutex;
 
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 pub mod bitmap;
-use bitmap::BitmapBitIndex;
+use bitmap::{BitmapAllocator, BitmapBitIndex};
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -97,24 +100,32 @@ impl DeviceLayout {
             data_blocks,
         })
     }
-}
-pub struct BlockDevice<D> {
-    pub(crate) inner: D,
-    layout: DeviceLayout,
+
+    pub fn from_device<D: BlockAccess<BLOCK_SIZE>>(device: &D) -> Result<Self, Error> {
+        let blocks = device.device_size()?;
+        Self::new(blocks)
+    }
 }
 
-impl<D: BlockAccess<BLOCK_SIZE>> BlockDevice<D> {
+struct FilesystemInner<D> {
+    alloc: Mutex<BitmapAllocator>,
+    device: D,
+}
+
+impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
     pub fn new(device: D) -> Result<Self, Error> {
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
 
-        Ok(Self {
-            inner: device,
-            layout,
-        })
+        let alloc = Mutex::new(BitmapAllocator::new(&device, &layout));
+        Ok(Self { alloc, device })
     }
+}
 
-    pub fn layout(&self) -> &DeviceLayout {
-        &self.layout
+pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
+
+impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
+    pub fn new(device: D) -> Result<Self, Error> {
+        Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
     }
 }

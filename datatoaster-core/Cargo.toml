@@ -6,11 +6,12 @@ edition = "2021"
 
 [features]
 default = []
-std = ["no-std-compat/std", "bytemuck/extern_crate_std"]
+std = ["no-std-compat/std", "spin/std", "bytemuck/extern_crate_std"]
 
 [dependencies]
 no-std-compat = { version = "0.4", features = ["alloc"] }
 datatoaster-traits = { path = "../datatoaster-traits" }
+spin = "0.9.8"
 bytemuck = { version = "1.16.0", features = [
     "extern_crate_alloc",
     "zeroable_maybe_uninit",

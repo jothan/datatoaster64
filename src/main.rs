@@ -1,4 +1,4 @@
-use datatoaster_core::{BlockDevice, Error};
+use datatoaster_core::{DeviceLayout, Error};
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 struct DummyDevice;
@@ -28,9 +28,10 @@ unsafe impl BlockAccess<4096> for DummyDevice {
 }
 
 fn main() -> Result<(), Error> {
-    let dev = BlockDevice::new(DummyDevice)?;
+    let dev = DummyDevice;
+    let layout = DeviceLayout::from_device(&dev)?;
 
-    println!("Device layout: {:?}", dev.layout());
+    println!("Device layout: {:?}", layout);
 
     Ok(())
 }
