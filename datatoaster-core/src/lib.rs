@@ -8,6 +8,8 @@ use std::prelude::v1::*;
 use std::ops::Range;
 use std::sync::Arc;
 
+use bytemuck::Zeroable;
+use directory::{DirEntry, DirEntryBlock};
 use spin::lock_api::Mutex;
 
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
@@ -18,7 +20,8 @@ pub mod inode;
 pub mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
-use inode::INODES_PER_BLOCK;
+use inode::{Inode, InodeBlock, InodeType, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE};
+use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -139,5 +142,50 @@ pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn new(device: D) -> Result<Self, Error> {
         Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
+    }
+
+    pub fn format(device: &D) -> Result<(), Error> {
+        let total_blocks = device.device_size()?;
+        let layout = DeviceLayout::new(total_blocks)?;
+
+        const ZERO_BLOCK: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
+
+        // Wipe all metadata
+        for block_idx in 0..layout.bitmap_blocks.end.0 {
+            device.write(BlockIndex(block_idx), &ZERO_BLOCK)?;
+        }
+
+        let mut alloc = BitmapAllocator::new(device, &layout);
+
+        // Create the root directory contents
+        let root_dir_data = alloc.alloc(device)?;
+        alloc.sync(device)?;
+
+        let root_dir_contents =
+            DirEntryBlock::new_empty(ROOT_DIRECTORY_INODE, ROOT_DIRECTORY_INODE);
+        device.write(
+            root_dir_data.into(),
+            bytemuck::bytes_of(&root_dir_contents).try_into().unwrap(),
+        )?;
+
+        // Create the root directory inode
+        let mut root_inode = Inode::zeroed();
+        root_inode.kind = InodeType::Directory as _;
+        root_inode.nlink = 2;
+        root_inode.size = (std::mem::size_of::<DirEntry>() * 2).try_into().unwrap();
+        root_inode.direct_blocks[0] = Some(root_dir_data);
+
+        let mut root_inode_block = InodeBlock::zeroed();
+        root_inode_block.0[0] = root_inode;
+        device.write(
+            layout.inode_blocks.start,
+            bytemuck::bytes_of(&root_inode_block).try_into().unwrap(),
+        )?;
+
+        // Create the superblock
+        let sup = SuperBlock::new(ROOT_DIRECTORY_INODE);
+        sup.write(device)?;
+
+        Ok(())
     }
 }

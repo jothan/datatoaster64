@@ -11,6 +11,9 @@ pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inod
 #[repr(transparent)]
 pub(crate) struct InodeIndex(NonZeroU64);
 
+pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex =
+    InodeIndex(unsafe { NonZeroU64::new_unchecked(2) });
+
 unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
@@ -24,16 +27,16 @@ pub(crate) enum InodeType {
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug, Default)]
 #[repr(C)]
-struct Inode {
-    kind: u16,
-    nlink: u16,
-    mode: libc::mode_t,
-    uid: libc::uid_t,
-    gid: libc::uid_t,
-    size: u64,
-    direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
+pub(crate) struct Inode {
+    pub(crate) kind: u16,
+    pub(crate) nlink: u16,
+    pub(crate) mode: libc::mode_t,
+    pub(crate) uid: libc::uid_t,
+    pub(crate) gid: libc::uid_t,
+    pub(crate) size: u64,
+    pub(crate) direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
 }
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, bytemuck::TransparentWrapper, Clone, Copy)]
 #[repr(transparent)]
-struct InodeBlock([Inode; INODES_PER_BLOCK]);
+pub(crate) struct InodeBlock(pub(crate) [Inode; INODES_PER_BLOCK]);

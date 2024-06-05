@@ -12,14 +12,14 @@ const ENDIAN_CHECK: u64 = 0x0102030405060708;
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]
-struct SuperBlock {
+pub(crate) struct SuperBlock {
     magic: u64,
     endian_check: u64,
     root_directory: Option<InodeIndex>,
 }
 
 impl SuperBlock {
-    fn new(root_directory: InodeIndex) -> Self {
+    pub(crate) fn new(root_directory: InodeIndex) -> Self {
         SuperBlock {
             magic: MAGIC,
             endian_check: ENDIAN_CHECK,
@@ -27,7 +27,7 @@ impl SuperBlock {
         }
     }
 
-    fn write<D: BlockAccess<BLOCK_SIZE>>(&self, device: &D) -> Result<(), Error> {
+    pub(crate) fn write<D: BlockAccess<BLOCK_SIZE>>(&self, device: &D) -> Result<(), Error> {
         let mut block = [0u8; BLOCK_SIZE];
         block[0..std::mem::size_of::<SuperBlock>()].copy_from_slice(bytemuck::bytes_of(self));
 

@@ -10,7 +10,7 @@ pub(crate) const DIRENTRY_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Di
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]
-struct DirEntry {
+pub(crate) struct DirEntry {
     inode: Option<InodeIndex>,
     kind: u16,
     name: [u8; MAX_FILENAME_LENGTH],
@@ -18,7 +18,7 @@ struct DirEntry {
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, bytemuck::TransparentWrapper, Clone, Copy)]
 #[repr(transparent)]
-struct DirEntryBlock([DirEntry; DIRENTRY_PER_BLOCK]);
+pub(crate) struct DirEntryBlock([DirEntry; DIRENTRY_PER_BLOCK]);
 
 const EMPTY_NAME: [u8; MAX_FILENAME_LENGTH] = [0; MAX_FILENAME_LENGTH];
 
