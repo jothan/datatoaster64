@@ -2,14 +2,15 @@
 #![feature(array_chunks)]
 extern crate no_std_compat as std;
 
-use core::num::NonZeroU64;
 use std::prelude::v1::*;
 
+use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use directory::{DirEntry, DirEntryBlock};
+use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
@@ -25,19 +26,25 @@ use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
+    #[snafu(display("General FS failure"))]
     General,
+    #[snafu(display("Invalid FS condition"))]
     Invalid,
+    #[snafu(display("Invalid FS device bounds"))]
     DeviceBounds,
+    #[snafu(display("No more space in FS"))]
     OutOfSpace,
+    #[snafu(display("Invalid superblock"))]
     SuperBlock,
-    Block(BlockError),
+    #[snafu(display("Block device error {e}"))]
+    Block { e: BlockError },
 }
 
 impl From<BlockError> for Error {
-    fn from(value: BlockError) -> Self {
-        Error::Block(value)
+    fn from(e: BlockError) -> Self {
+        Error::Block { e }
     }
 }
 

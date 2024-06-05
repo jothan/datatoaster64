@@ -8,7 +8,7 @@ use super::inode::InodeIndex;
 use crate::{BlockIndex, Error, BLOCK_SIZE};
 
 const MAGIC: u64 = 0x90d18c516db2bce7;
-const ENDIAN_CHECK: u64 = 0x0102030405060708;
+const ENDIAN_CHECK: u64 = 0x0807060504030201;
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]

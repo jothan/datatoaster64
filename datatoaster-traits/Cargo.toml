@@ -10,6 +10,7 @@ std = [ "no-std-compat/std" ]
 
 [dependencies]
 no-std-compat = "0.4"
+snafu = { version = "0.8.3", default-features = false, features = ["unstable-core-error", "rust_1_65"] }
 
 [lints]
 workspace = true

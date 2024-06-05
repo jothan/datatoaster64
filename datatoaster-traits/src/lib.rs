@@ -5,13 +5,18 @@ use std::prelude::v1::*;
 
 use std::mem::MaybeUninit;
 
+use snafu::prelude::*;
+
 #[derive(Clone, Copy, PartialEq, PartialOrd, Ord, Eq, Debug)]
 pub struct BlockIndex(pub u64);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
+    #[snafu(display("General block device error"))]
     General,
+    #[snafu(display("Block device I/O error"))]
     IO,
+    #[snafu(display("Invalid block device condition"))]
     Invalid,
 }
 
