@@ -16,6 +16,7 @@ pub mod bitmap;
 pub mod inode;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
+use inode::INODES_PER_BLOCK;
 
 pub const BLOCK_SIZE: usize = 4096;
 
@@ -69,7 +70,6 @@ pub struct DeviceLayout {
 
 impl DeviceLayout {
     const MIN_BLOCKS: BlockIndex = BlockIndex(64);
-    const INODES_PER_BLOCK: u64 = 128; // TODO: only an approximation
     const INODE_RATIO: u64 = 16384; // bytes per inode
 
     fn new(total_blocks: BlockIndex) -> Result<Self, Error> {
@@ -83,7 +83,10 @@ impl DeviceLayout {
             .checked_mul(BLOCK_SIZE.try_into().unwrap())
             .ok_or(Error::DeviceBounds)?;
         let nb_inodes = device_bytes / Self::INODE_RATIO;
-        let nb_inode_blocks = nb_inodes.div_ceil(Self::INODES_PER_BLOCK);
+        let nb_inode_blocks = nb_inodes.div_ceil(INODES_PER_BLOCK.try_into().unwrap());
+        // Use all the space in the inode blocks
+        let nb_inodes = nb_inode_blocks * (u64::try_from(INODES_PER_BLOCK).unwrap());
+
         let nb_data_and_bitmap_blocks = nb_data_and_metadata_blocks
             .checked_sub(nb_inode_blocks)
             .ok_or(Error::DeviceBounds)?;

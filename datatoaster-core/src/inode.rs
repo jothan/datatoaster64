@@ -5,7 +5,7 @@ use std::num::NonZeroU64;
 use crate::{DataBlockIndex, BLOCK_SIZE};
 
 const NB_DIRECT_BLOCKS: usize = 13;
-const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
+pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
 
 #[derive(bytemuck::TransparentWrapper, Clone, Copy)]
 #[repr(transparent)]
