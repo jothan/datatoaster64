@@ -5,7 +5,7 @@ version.workspace = true
 edition = "2021"
 
 [features]
-default = []
+default = ["std"]
 std = ["no-std-compat/std"]
 
 [dependencies]
