@@ -4,13 +4,14 @@ extern crate no_std_compat as std;
 
 use std::prelude::v1::*;
 
-use bitmap::BitmapBitIndex;
-use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 use std::ops::Range;
 
-pub const BLOCK_SIZE: usize = 4096;
+use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 pub mod bitmap;
+use bitmap::BitmapBitIndex;
+
+pub const BLOCK_SIZE: usize = 4096;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
