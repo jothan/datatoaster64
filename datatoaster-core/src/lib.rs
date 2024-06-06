@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(array_chunks)]
 extern crate no_std_compat as std;
 
 use std::prelude::v1::*;
