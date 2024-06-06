@@ -134,11 +134,11 @@ impl InodeAllocator {
         self.get_block(block_index, device, |block| block.0[block_offset].clone())
     }
 
-    fn get_block<D: BlockAccess<BLOCK_SIZE>, T, F: FnOnce(&InodeBlock) -> T>(
+    fn get_block<D: BlockAccess<BLOCK_SIZE>, T>(
         &self,
         block_index: InodeBlockIndex,
         device: &D,
-        f: F,
+        f: impl FnOnce(&InodeBlock) -> T,
     ) -> Result<T, Error> {
         match self.blocks.lock().entry(block_index) {
             Entry::Vacant(e) => {
