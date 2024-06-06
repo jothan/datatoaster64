@@ -57,24 +57,91 @@ impl FileBlockIndex {
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug)]
 #[repr(u16)]
-pub(crate) enum InodeType {
+pub enum InodeType {
     Free = 0,
     Directory = 1,
     File = 2,
 }
 
+impl TryFrom<u16> for InodeType {
+    type Error = Error;
+
+    fn try_from(value: u16) -> Result<Self, Error> {
+        Ok(match value {
+            0 => InodeType::Free,
+            1 => InodeType::Directory,
+            2 => InodeType::File,
+            _ => return Err(Error::Invalid),
+        })
+    }
+}
+
+pub struct Stat {
+    pub inode: u64,
+    pub kind: InodeType,
+    pub nlink: u32,
+    pub perm: u16,
+    pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
+    pub blksize: u32,
+    pub blocks: u64,
+    pub size: u64,
+}
+
+impl TryFrom<(InodeIndex, &Inode)> for Stat {
+    type Error = Error;
+
+    fn try_from(value: (InodeIndex, &Inode)) -> Result<Self, Self::Error> {
+        let inode = value.0 .0.get();
+        let kind = value.1.kind.try_into()?;
+        let nlink = value.1.nlink;
+        let perm = value.1.perm;
+        let uid = value.1.uid;
+        let gid = value.1.gid;
+        let blksize = BLOCK_SIZE.try_into().map_err(|_| Error::Invalid)?;
+        let blocks_raw = value
+            .1
+            .direct_blocks
+            .iter()
+            .filter_map(|b| b.as_ref())
+            .count();
+
+        let blocks = u64::try_from(blocks_raw).map_err(|_| Error::Invalid)? * 8; // Blocks of 512 bytes
+        let size = match kind {
+            InodeType::Free => 0,
+            InodeType::Directory => (blocks_raw * BLOCK_SIZE)
+                .try_into()
+                .map_err(|_| Error::Invalid)?,
+            InodeType::File => value.1.size,
+        };
+
+        Ok(Stat {
+            inode,
+            kind,
+            nlink,
+            perm,
+            uid,
+            gid,
+            blksize,
+            blocks,
+            size,
+        })
+    }
+}
+
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]
 pub(crate) struct Inode {
-    pub(crate) kind: u16,
-    pub(crate) nlink: u16,
-    pub(crate) mode: libc::mode_t,
-    pub(crate) uid: libc::uid_t,
-    pub(crate) gid: libc::uid_t,
     // For files: the size in bytes
     // For directories: the number of directory entries (besides . and ..)
     pub(crate) size: u64,
     pub(crate) direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
+
+    pub(crate) uid: libc::uid_t,
+    pub(crate) gid: libc::gid_t,
+    pub(crate) kind: u16,
+    pub(crate) perm: u16,
+    pub(crate) nlink: u32,
 }
 
 impl Inode {
@@ -327,7 +394,7 @@ impl InodeAllocator {
     }
 
     // Called mostly by user code, so don't panic.
-    fn inode_index_from_u64(&self, index: u64) -> Result<InodeIndex, Error> {
+    pub(crate) fn inode_index_from_u64(&self, index: u64) -> Result<InodeIndex, Error> {
         let out = InodeIndex(NonZeroU64::new(index).ok_or(Error::Invalid)?);
         let block =
             InodeBlockIndex((out.ordinal() / INODES_PER_BLOCK as u64) + self.block_range.start.0);

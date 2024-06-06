@@ -15,21 +15,21 @@ use spin::lock_api::Mutex;
 
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
-pub mod bitmap;
-pub mod directory;
-pub mod filehandle;
-pub mod inode;
-pub mod superblock;
+mod bitmap;
+mod directory;
+mod filehandle;
+mod inode;
+mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 use inode::{
-    Inode, InodeAllocator, InodeHandle, InodeIndex, InodeType, RawInodeBlock, INODES_PER_BLOCK,
+    Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock, INODES_PER_BLOCK,
     ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
-pub use inode::ROOT_INODE;
+pub use inode::{InodeType, Stat, ROOT_INODE};
 
 #[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
@@ -213,6 +213,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         self.0.sync()
     }
 
+    pub fn stat(&self, inode_index: u64) -> Result<Stat, Error> {
+        let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
+        let inode = self.0.inodes.get_handle(inode_index, &self.0.device)?;
+        let guard = inode.1.read();
+
+        Stat::try_from((inode.0, &*guard))
+    }
+
     pub fn format(device: &D) -> Result<(), Error> {
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
@@ -241,7 +249,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let mut root_inode = Inode::zeroed();
         root_inode.kind = InodeType::Directory as _;
         root_inode.nlink = 2;
-        root_inode.mode = 0x1ed; // 755 octal
+        root_inode.perm = 0x1ed; // 755 octal
         root_inode.direct_blocks[0] = Some(root_dir_data);
 
         let mut root_inode_block = RawInodeBlock::zeroed();
