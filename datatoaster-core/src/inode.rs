@@ -29,7 +29,7 @@ impl From<InodeBlockIndex> for BlockIndex {
     }
 }
 
-#[derive(bytemuck::TransparentWrapper, Clone, Copy, Debug)]
+#[derive(bytemuck::TransparentWrapper, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub(crate) struct InodeIndex(NonZeroU64);
 
@@ -89,7 +89,7 @@ impl From<&InodeBlockSnapshot> for RawInodeBlock {
     }
 }
 
-type InodeHandle = Arc<RwLock<Inode>>;
+pub(crate) type InodeHandle = Arc<RwLock<Inode>>;
 struct InodeBlock(pub(crate) [InodeHandle; INODES_PER_BLOCK]);
 
 impl InodeBlock {
@@ -124,7 +124,7 @@ impl InodeAllocator {
         }
     }
 
-    fn get_handle<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn get_handle<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         index: InodeIndex,
         device: &D,
@@ -234,15 +234,13 @@ impl InodeAllocator {
         Err(Error::OutOfSpace)
     }
 
-    fn free<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &self,
-        index: InodeIndex,
+        inode: &mut Inode,
+        inode_index: InodeIndex,
         block_alloc: &Mutex<BitmapAllocator>,
         device: &D,
     ) -> Result<(), Error> {
-        let inode_handle = self.get_handle(index, device)?;
-        let mut inode = inode_handle.write();
-
         // FIXME: put a better condition here, make sure directories are empty.
         if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
             return Err(Error::Invalid);
@@ -264,7 +262,7 @@ impl InodeAllocator {
 
         self.dirty_blocks
             .lock()
-            .insert(index.location(self.block_range.clone()).0);
+            .insert(inode_index.location(self.block_range.clone()).0);
 
         Ok(())
     }

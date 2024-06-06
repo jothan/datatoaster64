@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use directory::{DirEntry, DirEntryBlock};
+use filehandle::{OpenCounter, RawFileHandle};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -16,12 +17,14 @@ use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 pub mod bitmap;
 pub mod directory;
+pub mod filehandle;
 pub mod inode;
 pub mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 use inode::{
-    Inode, InodeAllocator, InodeType, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
+    Inode, InodeAllocator, InodeHandle, InodeIndex, InodeType, RawInodeBlock, INODES_PER_BLOCK,
+    ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 
@@ -138,6 +141,7 @@ impl DeviceLayout {
 struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
     inodes: InodeAllocator,
+    open_counter: Mutex<OpenCounter>,
     device: D,
 }
 
@@ -152,6 +156,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
         Ok(Self {
             alloc,
             inodes,
+            open_counter: Mutex::new(OpenCounter::default()),
             device,
         })
     }
@@ -161,6 +166,34 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
 
         self.inodes.sync(&self.device)?;
         alloc.sync(&self.device)?;
+
+        Ok(())
+    }
+
+    pub(crate) fn raw_file_open(
+        self: Arc<Self>,
+        inode_index: InodeIndex,
+    ) -> Result<RawFileHandle<D>, Error> {
+        self.open_counter.lock().increment(inode_index)?;
+        let inode = self.inodes.get_handle(inode_index, &self.device)?;
+        Ok(RawFileHandle::new(self, inode_index, inode))
+    }
+
+    pub(crate) fn raw_file_close(
+        &self,
+        inode: InodeHandle,
+        inode_index: InodeIndex,
+    ) -> Result<(), Error> {
+        let mut open_counter = self.open_counter.lock();
+        let still_open = open_counter.decrement(inode_index)?.is_some();
+
+        if !still_open {
+            let mut inode = inode.write();
+            if inode.nlink == 0 {
+                self.inodes
+                    .free(&mut inode, inode_index, &self.alloc, &self.device)?;
+            }
+        }
 
         Ok(())
     }
