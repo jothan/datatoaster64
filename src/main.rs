@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use datatoaster_core::{Filesystem, BLOCK_SIZE};
-use datatoaster_traits::{BlockAccess, BlockIndex};
+use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 #[derive(Debug, clap::Parser)]
 #[command(name = "datatoaster64")]
@@ -76,9 +76,9 @@ impl FileDevice {
         })
     }
 
-    fn seek(file: &mut File, position: BlockIndex) -> Result<(), datatoaster_traits::Error> {
+    fn seek(file: &mut File, position: BlockIndex) -> Result<(), BlockError> {
         file.seek(SeekFrom::Start(position.0 * BLOCK_SIZE as u64))
-            .map_err(|_| datatoaster_traits::Error::IO)?;
+            .map_err(|_| BlockError::IO)?;
 
         Ok(())
     }
@@ -87,9 +87,9 @@ impl FileDevice {
 unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
     fn read(
         &self,
-        block_idx: datatoaster_traits::BlockIndex,
+        block_idx: BlockIndex,
         buffer: &mut std::mem::MaybeUninit<[u8; BLOCK_SIZE]>,
-    ) -> Result<(), datatoaster_traits::Error> {
+    ) -> Result<(), BlockError> {
         let mut file = self.file.lock().unwrap();
         Self::seek(&mut file, block_idx)?;
 
@@ -97,25 +97,21 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
         let buffer = unsafe { buffer.assume_init_mut() };
 
         file.read_exact(buffer.as_mut_slice())
-            .map_err(|_| datatoaster_traits::Error::IO)?;
+            .map_err(|_| BlockError::IO)?;
 
         Ok(())
     }
 
-    fn write(
-        &self,
-        block_idx: datatoaster_traits::BlockIndex,
-        buffer: &[u8; BLOCK_SIZE],
-    ) -> Result<(), datatoaster_traits::Error> {
+    fn write(&self, block_idx: BlockIndex, buffer: &[u8; BLOCK_SIZE]) -> Result<(), BlockError> {
         let mut file = self.file.lock().unwrap();
         Self::seek(&mut file, block_idx)?;
         file.write_all(buffer.as_slice())
-            .map_err(|_| datatoaster_traits::Error::IO)?;
+            .map_err(|_| BlockError::IO)?;
 
         Ok(())
     }
 
-    fn device_size(&self) -> Result<datatoaster_traits::BlockIndex, datatoaster_traits::Error> {
+    fn device_size(&self) -> Result<BlockIndex, BlockError> {
         Ok(self.block_length)
     }
 }
