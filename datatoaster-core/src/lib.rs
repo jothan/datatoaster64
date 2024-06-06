@@ -138,7 +138,7 @@ impl DeviceLayout {
     }
 }
 
-struct FilesystemInner<D> {
+pub(crate) struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
     inodes: InodeAllocator,
     open_counter: Mutex<OpenCounter>,

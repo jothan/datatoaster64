@@ -13,7 +13,7 @@ use spin::lock_api::{Mutex, RwLock};
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::bitmap::BitmapAllocator;
-use crate::{DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
+use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
 const NB_DIRECT_BLOCKS: usize = 13;
 const FIRST_INODE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(2) };
@@ -57,6 +57,19 @@ impl InodeIndex {
 unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+struct FileBlockIndex(u64);
+
+impl FileBlockIndex {
+    fn new(block: u64) -> Result<FileBlockIndex, Error> {
+        if block < INODES_PER_BLOCK as u64 {
+            Ok(FileBlockIndex(block))
+        } else {
+            Err(Error::Invalid)
+        }
+    }
+}
+
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug)]
 #[repr(u16)]
 pub(crate) enum InodeType {
@@ -75,6 +88,42 @@ pub(crate) struct Inode {
     pub(crate) gid: libc::uid_t,
     pub(crate) size: u64,
     pub(crate) direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
+}
+
+impl Inode {
+    // Returns None if reading a hole
+    // FIXME: returning a big value.
+    fn read_block<D: BlockAccess<BLOCK_SIZE>>(
+        &self,
+        fs: &FilesystemInner<D>,
+        block: FileBlockIndex,
+    ) -> Result<Option<[u8; BLOCK_SIZE]>, Error> {
+        let Some(data_block) = self.direct_blocks[block.0 as usize] else {
+            return Ok(None);
+        };
+        let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+        fs.device.read(data_block.into(), &mut buffer)?;
+        Ok(Some(unsafe { buffer.assume_init() }))
+    }
+
+    fn write_block<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        inode_index: InodeIndex,
+        fs: &FilesystemInner<D>,
+        block: FileBlockIndex,
+        buffer: &[u8; BLOCK_SIZE],
+    ) -> Result<(), Error> {
+        let data_block = if let Some(data_block) = self.direct_blocks[block.0 as usize] {
+            data_block
+        } else {
+            let data_block = fs.alloc_data(inode_index)?;
+            self.direct_blocks[block.0 as usize] = Some(data_block);
+            data_block
+        };
+
+        fs.device.write(data_block.into(), buffer)?;
+        Ok(())
+    }
 }
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, bytemuck::TransparentWrapper, Clone, Copy)]
