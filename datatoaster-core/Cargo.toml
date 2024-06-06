@@ -26,6 +26,7 @@ libc = { version = "0.2.155", default-features = false, features = [
     "extra_traits",
 ] }
 snafu = { version = "0.8.3", default-features = false, features = ["unstable-core-error", "rust_1_65"] }
+lock_api = { version = "0.4.12", default-features = false, features = ["arc_lock"] }
 
 [lints]
 workspace = true

@@ -7,7 +7,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use spin::lock_api::{Mutex, RwLock, RwLockReadGuard};
+use lock_api::ArcRwLockReadGuard;
+use spin::lock_api::{Mutex, RwLock};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
@@ -71,17 +72,20 @@ pub(crate) struct Inode {
 #[repr(transparent)]
 pub(crate) struct RawInodeBlock(pub(crate) [Inode; INODES_PER_BLOCK]);
 
+type InodeBlockSnapshot = [ArcRwLockReadGuard<spin::RwLock<()>, Inode>; INODES_PER_BLOCK];
+
+impl From<&InodeBlockSnapshot> for RawInodeBlock {
+    fn from(value: &[ArcRwLockReadGuard<spin::RwLock<()>, Inode>; INODES_PER_BLOCK]) -> Self {
+        RawInodeBlock(std::array::from_fn(|i| *value[i]))
+    }
+}
+
 type InodeHandle = Arc<RwLock<Inode>>;
-#[derive(Clone)]
 struct InodeBlock(pub(crate) [InodeHandle; INODES_PER_BLOCK]);
 
 impl InodeBlock {
-    fn snapshot(&self) -> (RawInodeBlock, [RwLockReadGuard<Inode>; INODES_PER_BLOCK]) {
-        let guards: [RwLockReadGuard<Inode>; INODES_PER_BLOCK] =
-            std::array::from_fn(|i| self.0[i].read());
-        let inodes = RawInodeBlock(std::array::from_fn(|i| *guards[i]));
-
-        (inodes, guards)
+    fn snapshot(&self) -> InodeBlockSnapshot {
+        std::array::from_fn(|i| self.0[i].read_arc())
     }
 }
 
@@ -109,20 +113,28 @@ impl InodeAllocator {
         }
     }
 
-    fn get<D: BlockAccess<BLOCK_SIZE>>(
+    fn get_handle<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         index: InodeIndex,
         device: &D,
     ) -> Result<InodeHandle, Error> {
         let (block_index, block_offset) = index.location(self.block_range.clone());
 
+        self.get_block(block_index, device, |block| block.0[block_offset].clone())
+    }
+
+    fn get_block<D: BlockAccess<BLOCK_SIZE>, T, F: FnOnce(&InodeBlock) -> T>(
+        &self,
+        block_index: InodeBlockIndex,
+        device: &D,
+        f: F,
+    ) -> Result<T, Error> {
         match self.blocks.lock().entry(block_index) {
             Entry::Vacant(e) => {
                 let block = Self::read_block(block_index, device)?.into();
-                let slot = Arc::clone(&e.insert(block).0[block_offset]);
-                Ok(slot)
+                Ok(f(e.insert(block)))
             }
-            Entry::Occupied(e) => Ok(Arc::clone(&e.get().0[block_offset])),
+            Entry::Occupied(e) => Ok(f(e.get())),
         }
     }
 
@@ -159,15 +171,14 @@ impl InodeAllocator {
             drop(dirty_guard);
 
             // The lock order is very important here.
-            let block = {
+            let snapshot = {
                 let blocks = self.blocks.lock();
-                blocks.get(&block_index).unwrap().clone()
+                blocks.get(&block_index).unwrap().snapshot()
             };
-            let (snapshot, _lock_guards) = block.snapshot();
 
             dirty_guard = self.dirty_blocks.lock();
 
-            Self::write_block(block_index, device, &snapshot)?;
+            Self::write_block(block_index, device, &(&snapshot).into())?;
             dirty_guard.remove(&block_index);
         }
     }
@@ -178,7 +189,7 @@ impl InodeAllocator {
         block_alloc: &Mutex<BitmapAllocator>,
         device: &D,
     ) -> Result<(), Error> {
-        let inode_handle = self.get(index, device)?;
+        let inode_handle = self.get_handle(index, device)?;
         let mut inode = inode_handle.write();
 
         // FIXME: put a better condition here, make sure directories are empty.
