@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use directory::{DirEntry, DirEntryBlock};
+use directory::DirEntryBlock;
 use filehandle::{OpenCounter, RawFileHandle};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
@@ -244,7 +244,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let mut root_inode = Inode::zeroed();
         root_inode.kind = InodeType::Directory as _;
         root_inode.nlink = 2;
-        root_inode.size = (std::mem::size_of::<DirEntry>() * 2).try_into().unwrap();
         root_inode.mode = 0x1ed; // 755 octal
         root_inode.direct_blocks[0] = Some(root_dir_data);
 

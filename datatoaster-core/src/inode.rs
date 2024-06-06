@@ -86,6 +86,8 @@ pub(crate) struct Inode {
     pub(crate) mode: libc::mode_t,
     pub(crate) uid: libc::uid_t,
     pub(crate) gid: libc::uid_t,
+    // For files: the size in bytes
+    // For directories: the number of directory entries (besides . and ..)
     pub(crate) size: u64,
     pub(crate) direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
 }
