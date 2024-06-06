@@ -65,7 +65,7 @@ pub(crate) enum InodeType {
     File = 2,
 }
 
-#[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug, Default)]
+#[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]
 pub(crate) struct Inode {
     pub(crate) kind: u16,
@@ -234,6 +234,11 @@ impl InodeAllocator {
         Err(Error::OutOfSpace)
     }
 
+    pub(crate) fn dirty_inode_block(&self, inode_block: InodeIndex) {
+        let block = inode_block.location(self.block_range.clone()).0;
+        self.dirty_blocks.lock().insert(block);
+    }
+
     pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         inode: &mut Inode,
@@ -260,9 +265,7 @@ impl InodeAllocator {
 
         *inode = Inode::zeroed();
 
-        self.dirty_blocks
-            .lock()
-            .insert(inode_index.location(self.block_range.clone()).0);
+        self.dirty_inode_block(inode_index);
 
         Ok(())
     }

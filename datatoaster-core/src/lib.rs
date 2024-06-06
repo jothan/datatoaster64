@@ -197,6 +197,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
 
         Ok(())
     }
+
+    pub(crate) fn alloc_data(&self, inode_index: InodeIndex) -> Result<DataBlockIndex, Error> {
+        let block = self.alloc.lock().alloc(&self.device)?;
+        self.inodes.dirty_inode_block(inode_index);
+        Ok(block)
+    }
 }
 
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);

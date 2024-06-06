@@ -1,13 +1,27 @@
 use std::prelude::v1::*;
 
 use std::collections::{btree_map::Entry, BTreeMap};
+use std::mem::MaybeUninit;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use datatoaster_traits::BlockAccess;
 
-use crate::inode::{InodeHandle, InodeIndex};
+use crate::inode::{InodeHandle, InodeIndex, INODES_PER_BLOCK};
 use crate::{Error, FilesystemInner, BLOCK_SIZE};
+
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+struct FileBlockIndex(u64);
+
+impl FileBlockIndex {
+    fn new(block: u64) -> Result<FileBlockIndex, Error> {
+        if block < INODES_PER_BLOCK as u64 {
+            Ok(FileBlockIndex(block))
+        } else {
+            Err(Error::Invalid)
+        }
+    }
+}
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
     fs: Arc<FilesystemInner<D>>,
@@ -26,6 +40,40 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
             inode: Some(inode),
             inode_index,
         }
+    }
+
+    // Returns None if reading a hole
+    // FIXME: returning a big value.
+    fn read_block(&self, block: FileBlockIndex) -> Result<Option<[u8; BLOCK_SIZE]>, Error> {
+        let Some(inode) = self.inode.as_ref() else {
+            return Err(Error::Invalid);
+        };
+
+        let inode = inode.read();
+        let Some(data_block) = inode.direct_blocks[block.0 as usize] else {
+            return Ok(None);
+        };
+        let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+        self.fs.device.read(data_block.into(), &mut buffer)?;
+        Ok(Some(unsafe { buffer.assume_init() }))
+    }
+
+    fn write_block(&self, block: FileBlockIndex, buffer: &[u8; BLOCK_SIZE]) -> Result<(), Error> {
+        let Some(inode) = self.inode.as_ref() else {
+            return Err(Error::Invalid);
+        };
+
+        let mut inode = inode.write();
+        let data_block = if let Some(data_block) = inode.direct_blocks[block.0 as usize] {
+            data_block
+        } else {
+            let data_block = self.fs.alloc_data(self.inode_index)?;
+            inode.direct_blocks[block.0 as usize] = Some(data_block);
+            data_block
+        };
+
+        self.fs.device.write(data_block.into(), buffer)?;
+        Ok(())
     }
 
     fn close(&mut self) -> Result<(), Error> {
