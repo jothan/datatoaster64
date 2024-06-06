@@ -21,7 +21,9 @@ pub mod inode;
 pub mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
-use inode::{Inode, InodeBlock, InodeType, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE};
+use inode::{
+    Inode, InodeAllocator, InodeType, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
+};
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -127,10 +129,16 @@ impl DeviceLayout {
         let blocks = device.device_size()?;
         Self::new(blocks)
     }
+
+    pub fn nb_inodes(&self) -> u64 {
+        (self.inode_blocks.end.0 - self.inode_blocks.start.0)
+            * u64::try_from(INODES_PER_BLOCK).unwrap()
+    }
 }
 
 struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
+    inodes: Mutex<InodeAllocator>,
     device: D,
 }
 
@@ -140,14 +148,20 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
         let layout = DeviceLayout::new(total_blocks)?;
 
         let alloc = Mutex::new(BitmapAllocator::new(&layout));
-        Ok(Self { alloc, device })
+        let inodes = Mutex::new(InodeAllocator::new(&layout));
+
+        Ok(Self {
+            alloc,
+            inodes,
+            device,
+        })
     }
 }
 
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
-    pub fn new(device: D) -> Result<Self, Error> {
+    pub fn open(device: D) -> Result<Self, Error> {
         Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
     }
 
@@ -180,9 +194,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         root_inode.kind = InodeType::Directory as _;
         root_inode.nlink = 2;
         root_inode.size = (std::mem::size_of::<DirEntry>() * 2).try_into().unwrap();
+        root_inode.mode = 0x1ed; // 755 octal
         root_inode.direct_blocks[0] = Some(root_dir_data);
 
-        let mut root_inode_block = InodeBlock::zeroed();
+        let mut root_inode_block = RawInodeBlock::zeroed();
         root_inode_block.0[0] = root_inode;
         device.write(
             layout.inode_blocks.start,

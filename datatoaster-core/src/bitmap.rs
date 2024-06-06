@@ -16,7 +16,7 @@ const BITS_PER_BLOCK: u64 = BLOCK_SIZE as u64 * 8;
 struct BitmapBlock([u64; BITMAP_SEGMENTS]);
 
 #[derive(Default)]
-pub(crate) struct BitmapBlocks {
+struct BitmapBlocks {
     blocks: BTreeMap<BitmapBlockIndex, BitmapBlock>,
     dirty_blocks: BTreeSet<BitmapBlockIndex>,
 }

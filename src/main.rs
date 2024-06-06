@@ -116,6 +116,13 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
     }
 }
 
+fn mount_device(path: Box<Path>) -> anyhow::Result<()> {
+    let device = FileDevice::open_for_mount(path)?;
+    let _fs = Filesystem::open(device)?;
+
+    Ok(())
+}
+
 fn format_device(path: Box<Path>, size_in_mb: NonZeroU64) -> anyhow::Result<()> {
     let device = FileDevice::open_for_format(path, size_in_mb)?;
     Filesystem::format(&device)?;
@@ -126,7 +133,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Mount => todo!(),
+        Command::Mount => mount_device(args.data_path)?,
         Command::Format { device_size_mb } => format_device(args.data_path, device_size_mb)?,
     }
 
