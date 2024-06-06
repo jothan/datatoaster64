@@ -22,7 +22,6 @@ cd $THIS_REPO
 
 # Create an empty filesystem image in data.toast
 cargo run --release format
-mkdir mnt
 
 # This commands stays in the foreground as long as the filesystem is mounted.
 # You may access the directory with another terminal in the mean time.
