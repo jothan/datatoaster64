@@ -156,6 +156,16 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
             device,
         })
     }
+
+    pub(crate) fn sync(&self) -> Result<(), Error> {
+        let inodes = self.inodes.lock();
+        let mut alloc = self.alloc.lock();
+
+        inodes.sync(&self.device)?;
+        alloc.sync(&self.device)?;
+
+        Ok(())
+    }
 }
 
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
@@ -163,6 +173,10 @@ pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn open(device: D) -> Result<Self, Error> {
         Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
+    }
+
+    pub fn sync(&self) -> Result<(), Error> {
+        self.0.sync()
     }
 
     pub fn format(device: &D) -> Result<(), Error> {
