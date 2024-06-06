@@ -12,19 +12,13 @@ use crate::{Error, FilesystemInner, BLOCK_SIZE};
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
     fs: Arc<FilesystemInner<D>>,
     inode: Option<InodeHandle>,
-    inode_index: InodeIndex,
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
-    pub(crate) fn new(
-        fs: Arc<FilesystemInner<D>>,
-        inode_index: InodeIndex,
-        inode: InodeHandle,
-    ) -> Self {
+    pub(crate) fn new(fs: Arc<FilesystemInner<D>>, inode: InodeHandle) -> Self {
         RawFileHandle {
             fs,
             inode: Some(inode),
-            inode_index,
         }
     }
 
@@ -33,7 +27,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
             return Ok(());
         };
 
-        self.fs.raw_file_close(inode, self.inode_index)
+        self.fs.raw_file_close(inode)
     }
 }
 

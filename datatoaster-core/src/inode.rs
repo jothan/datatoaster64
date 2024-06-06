@@ -34,23 +34,8 @@ impl From<InodeBlockIndex> for BlockIndex {
 pub(crate) struct InodeIndex(NonZeroU64);
 
 impl InodeIndex {
-    fn new(block_range: Range<InodeBlockIndex>, block: InodeBlockIndex, offset: usize) -> Self {
-        assert!(block_range.contains(&block));
-        assert!(offset < INODES_PER_BLOCK);
-        let relative_block = block.0.checked_sub(block_range.start.0).unwrap();
-
-        let inode_ordinal = relative_block * INODES_PER_BLOCK as u64 + offset as u64;
-        Self(NonZeroU64::new(inode_ordinal + FIRST_INODE.get()).unwrap())
-    }
-
-    fn location(&self, block_range: Range<InodeBlockIndex>) -> (InodeBlockIndex, usize) {
-        let inode_ordinal = self.0.get().checked_sub(FIRST_INODE.get()).unwrap();
-        let block =
-            InodeBlockIndex((inode_ordinal / INODES_PER_BLOCK as u64) + block_range.start.0);
-        assert!(block_range.contains(&block));
-        let index = (inode_ordinal % INODES_PER_BLOCK as u64) as usize;
-
-        (block, index)
+    fn ordinal(&self) -> u64 {
+        self.0.get().checked_sub(ROOT_INODE.get()).unwrap()
     }
 }
 
@@ -140,8 +125,8 @@ impl From<&InodeBlockSnapshot> for RawInodeBlock {
     }
 }
 
-pub(crate) type InodeHandle = Arc<RwLock<Inode>>;
-struct InodeBlock(pub(crate) [InodeHandle; INODES_PER_BLOCK]);
+pub(crate) struct InodeHandle(pub(crate) InodeIndex, pub(crate) Arc<RwLock<Inode>>);
+struct InodeBlock(pub(crate) [Arc<RwLock<Inode>>; INODES_PER_BLOCK]);
 
 impl InodeBlock {
     fn snapshot(&self) -> InodeBlockSnapshot {
@@ -180,9 +165,10 @@ impl InodeAllocator {
         index: InodeIndex,
         device: &D,
     ) -> Result<InodeHandle, Error> {
-        let (block_index, block_offset) = index.location(self.block_range.clone());
+        let (block_index, block_offset) = self.inode_index_location(index);
 
-        self.get_block(block_index, device, |block| block.0[block_offset].clone())
+        let h = self.get_block(block_index, device, |block| block.0[block_offset].clone())?;
+        Ok(InodeHandle(index, h))
     }
 
     fn get_block<D: BlockAccess<BLOCK_SIZE>, T>(
@@ -249,7 +235,7 @@ impl InodeAllocator {
         &self,
         device: &D,
         init: impl FnOnce(InodeIndex) -> Inode,
-    ) -> Result<(InodeIndex, InodeHandle), Error> {
+    ) -> Result<InodeHandle, Error> {
         let cursor = *self.alloc_cursor.lock();
         let mut iter = (cursor.0..self.block_range.end.0).chain(self.block_range.start.0..cursor.0);
 
@@ -259,7 +245,7 @@ impl InodeAllocator {
                 block.0.iter().enumerate().find_map(|(i, inode)| {
                     if Arc::strong_count(inode) == 1 {
                         let inode = inode.write_arc();
-                        let index = InodeIndex::new(self.block_range.clone(), block_index, i);
+                        let index = self.inode_index_from_location(block_index, i);
 
                         Some((index, inode)).filter(|(_, inode)| inode.kind == InodeType::Free as _)
                     } else {
@@ -279,14 +265,14 @@ impl InodeAllocator {
             drop(inode);
 
             *self.alloc_cursor.lock() = block_index;
-            return Ok((index, inode_arc));
+            return Ok(InodeHandle(index, inode_arc));
         }
 
         Err(Error::OutOfSpace)
     }
 
-    pub(crate) fn dirty_inode_block(&self, inode_block: InodeIndex) {
-        let block = inode_block.location(self.block_range.clone()).0;
+    pub(crate) fn dirty_inode_block(&self, inode_index: InodeIndex) {
+        let block = self.inode_index_location(inode_index).0;
         self.dirty_blocks.lock().insert(block);
     }
 
@@ -319,5 +305,36 @@ impl InodeAllocator {
         self.dirty_inode_block(inode_index);
 
         Ok(())
+    }
+
+    fn inode_index_from_location(&self, block: InodeBlockIndex, offset: usize) -> InodeIndex {
+        assert!(self.block_range.contains(&block));
+        assert!(offset < INODES_PER_BLOCK);
+        let relative_block = block.0.checked_sub(self.block_range.start.0).unwrap();
+
+        let inode_ordinal = relative_block * INODES_PER_BLOCK as u64 + offset as u64;
+        InodeIndex(NonZeroU64::new(inode_ordinal + ROOT_INODE.get()).unwrap())
+    }
+
+    fn inode_index_location(&self, inode_index: InodeIndex) -> (InodeBlockIndex, usize) {
+        let block = InodeBlockIndex(
+            (inode_index.ordinal() / INODES_PER_BLOCK as u64) + self.block_range.start.0,
+        );
+        assert!(self.block_range.contains(&block));
+        let index = (inode_index.ordinal() % INODES_PER_BLOCK as u64) as usize;
+
+        (block, index)
+    }
+
+    // Called mostly by user code, so don't panic.
+    fn inode_index_from_u64(&self, index: u64) -> Result<InodeIndex, Error> {
+        let out = InodeIndex(NonZeroU64::new(index).ok_or(Error::Invalid)?);
+        let block =
+            InodeBlockIndex((out.ordinal() / INODES_PER_BLOCK as u64) + self.block_range.start.0);
+
+        if !self.block_range.contains(&block) {
+            return Err(Error::Invalid);
+        }
+        Ok(out)
     }
 }

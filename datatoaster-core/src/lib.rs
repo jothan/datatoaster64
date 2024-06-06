@@ -29,6 +29,7 @@ use inode::{
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
+pub use inode::ROOT_INODE;
 
 #[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
@@ -176,22 +177,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
     ) -> Result<RawFileHandle<D>, Error> {
         self.open_counter.lock().increment(inode_index)?;
         let inode = self.inodes.get_handle(inode_index, &self.device)?;
-        Ok(RawFileHandle::new(self, inode_index, inode))
+        Ok(RawFileHandle::new(self, inode))
     }
 
-    pub(crate) fn raw_file_close(
-        &self,
-        inode: InodeHandle,
-        inode_index: InodeIndex,
-    ) -> Result<(), Error> {
+    pub(crate) fn raw_file_close(&self, inode: InodeHandle) -> Result<(), Error> {
         let mut open_counter = self.open_counter.lock();
-        let still_open = open_counter.decrement(inode_index)?.is_some();
+        let still_open = open_counter.decrement(inode.0)?.is_some();
 
         if !still_open {
-            let mut inode = inode.write();
-            if inode.nlink == 0 {
+            let mut guard = inode.1.write();
+            if guard.nlink == 0 {
                 self.inodes
-                    .free(&mut inode, inode_index, &self.alloc, &self.device)?;
+                    .free(&mut guard, inode.0, &self.alloc, &self.device)?;
             }
         }
 
