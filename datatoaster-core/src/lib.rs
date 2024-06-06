@@ -138,7 +138,7 @@ impl DeviceLayout {
 
 struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
-    inodes: Mutex<InodeAllocator>,
+    inodes: InodeAllocator,
     device: D,
 }
 
@@ -148,7 +148,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
         let layout = DeviceLayout::new(total_blocks)?;
 
         let alloc = Mutex::new(BitmapAllocator::new(&layout));
-        let inodes = Mutex::new(InodeAllocator::new(&layout));
+        let inodes = InodeAllocator::new(&layout);
 
         Ok(Self {
             alloc,
@@ -158,10 +158,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
     }
 
     pub(crate) fn sync(&self) -> Result<(), Error> {
-        let inodes = self.inodes.lock();
         let mut alloc = self.alloc.lock();
 
-        inodes.sync(&self.device)?;
+        self.inodes.sync(&self.device)?;
         alloc.sync(&self.device)?;
 
         Ok(())

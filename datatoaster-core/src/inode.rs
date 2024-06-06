@@ -6,10 +6,12 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 use std::sync::Arc;
 
+use bytemuck::Zeroable;
 use spin::lock_api::{Mutex, RwLock, RwLockReadGuard};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
+use crate::bitmap::BitmapAllocator;
 use crate::{DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
 
 const NB_DIRECT_BLOCKS: usize = 13;
@@ -70,6 +72,7 @@ pub(crate) struct Inode {
 pub(crate) struct RawInodeBlock(pub(crate) [Inode; INODES_PER_BLOCK]);
 
 type InodeHandle = Arc<RwLock<Inode>>;
+#[derive(Clone)]
 struct InodeBlock(pub(crate) [InodeHandle; INODES_PER_BLOCK]);
 
 impl InodeBlock {
@@ -89,8 +92,8 @@ impl From<RawInodeBlock> for InodeBlock {
 }
 
 pub(crate) struct InodeAllocator {
-    blocks: BTreeMap<InodeBlockIndex, InodeBlock>,
-    dirty_blocks: Arc<Mutex<BTreeSet<InodeBlockIndex>>>,
+    blocks: Mutex<BTreeMap<InodeBlockIndex, InodeBlock>>,
+    dirty_blocks: Mutex<BTreeSet<InodeBlockIndex>>,
     block_range: Range<InodeBlockIndex>,
 }
 
@@ -107,13 +110,13 @@ impl InodeAllocator {
     }
 
     fn get<D: BlockAccess<BLOCK_SIZE>>(
-        &mut self,
+        &self,
         index: InodeIndex,
         device: &D,
     ) -> Result<InodeHandle, Error> {
         let (block_index, block_offset) = index.location(self.block_range.clone());
 
-        match self.blocks.entry(block_index) {
+        match self.blocks.lock().entry(block_index) {
             Entry::Vacant(e) => {
                 let block = Self::read_block(block_index, device)?.into();
                 let slot = Arc::clone(&e.insert(block).0[block_offset]);
@@ -147,7 +150,7 @@ impl InodeAllocator {
         Ok(())
     }
 
-    fn sync<D: BlockAccess<BLOCK_SIZE>>(&self, device: &D) -> Result<(), Error> {
+    pub(super) fn sync<D: BlockAccess<BLOCK_SIZE>>(&self, device: &D) -> Result<(), Error> {
         loop {
             let mut dirty_guard = self.dirty_blocks.lock();
             let Some(block_index) = dirty_guard.first().copied() else {
@@ -156,11 +159,51 @@ impl InodeAllocator {
             drop(dirty_guard);
 
             // The lock order is very important here.
-            let (snapshot, _inode_guards) = self.blocks.get(&block_index).unwrap().snapshot();
+            let block = {
+                let blocks = self.blocks.lock();
+                blocks.get(&block_index).unwrap().clone()
+            };
+            let (snapshot, _lock_guards) = block.snapshot();
+
             dirty_guard = self.dirty_blocks.lock();
 
             Self::write_block(block_index, device, &snapshot)?;
             dirty_guard.remove(&block_index);
         }
+    }
+
+    fn free<D: BlockAccess<BLOCK_SIZE>>(
+        &self,
+        index: InodeIndex,
+        block_alloc: &Mutex<BitmapAllocator>,
+        device: &D,
+    ) -> Result<(), Error> {
+        let inode_handle = self.get(index, device)?;
+        let mut inode = inode_handle.write();
+
+        // FIXME: put a better condition here, make sure directories are empty.
+        if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
+            return Err(Error::Invalid);
+        }
+
+        let mut block_alloc = block_alloc.lock();
+        inode.direct_blocks.iter_mut().try_for_each(|b| {
+            if let Some(data_block) = *b {
+                block_alloc.free(device, data_block).inspect(|_| {
+                    *b = None;
+                })
+            } else {
+                Ok(())
+            }
+        })?;
+        drop(block_alloc);
+
+        *inode = Inode::zeroed();
+
+        self.dirty_blocks
+            .lock()
+            .insert(index.location(self.block_range.clone()).0);
+
+        Ok(())
     }
 }
