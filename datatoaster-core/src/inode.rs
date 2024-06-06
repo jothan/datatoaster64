@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use lock_api::ArcRwLockReadGuard;
+use lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard};
 use spin::lock_api::{Mutex, RwLock};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
@@ -34,6 +34,15 @@ impl From<InodeBlockIndex> for BlockIndex {
 pub(crate) struct InodeIndex(NonZeroU64);
 
 impl InodeIndex {
+    fn new(block_range: Range<InodeBlockIndex>, block: InodeBlockIndex, offset: usize) -> Self {
+        assert!(block_range.contains(&block));
+        assert!(offset < INODES_PER_BLOCK);
+        let relative_block = block.0.checked_sub(block_range.start.0).unwrap();
+
+        let inode_ordinal = relative_block * INODES_PER_BLOCK as u64 + offset as u64;
+        Self(NonZeroU64::new(inode_ordinal + FIRST_INODE.get()).unwrap())
+    }
+
     fn location(&self, block_range: Range<InodeBlockIndex>) -> (InodeBlockIndex, usize) {
         let inode_ordinal = self.0.get().checked_sub(FIRST_INODE.get()).unwrap();
         let block =
@@ -98,6 +107,7 @@ impl From<RawInodeBlock> for InodeBlock {
 pub(crate) struct InodeAllocator {
     blocks: Mutex<BTreeMap<InodeBlockIndex, InodeBlock>>,
     dirty_blocks: Mutex<BTreeSet<InodeBlockIndex>>,
+    alloc_cursor: Mutex<InodeBlockIndex>,
     block_range: Range<InodeBlockIndex>,
 }
 
@@ -109,6 +119,7 @@ impl InodeAllocator {
         Self {
             blocks: Default::default(),
             dirty_blocks: Default::default(),
+            alloc_cursor: Mutex::new(block_range.start),
             block_range,
         }
     }
@@ -181,6 +192,46 @@ impl InodeAllocator {
             Self::write_block(block_index, device, &(&snapshot).into())?;
             dirty_guard.remove(&block_index);
         }
+    }
+
+    fn alloc<D: BlockAccess<BLOCK_SIZE>>(
+        &self,
+        device: &D,
+        init: impl FnOnce(InodeIndex) -> Inode,
+    ) -> Result<(InodeIndex, InodeHandle), Error> {
+        let cursor = *self.alloc_cursor.lock();
+        let mut iter = (cursor.0..self.block_range.end.0).chain(self.block_range.start.0..cursor.0);
+
+        for block_index in &mut iter {
+            let block_index = InodeBlockIndex(block_index);
+            let scan_result = self.get_block(block_index, device, move |block| {
+                block.0.iter().enumerate().find_map(|(i, inode)| {
+                    if Arc::strong_count(inode) == 1 {
+                        let inode = inode.write_arc();
+                        let index = InodeIndex::new(self.block_range.clone(), block_index, i);
+
+                        Some((index, inode)).filter(|(_, inode)| inode.kind == InodeType::Free as _)
+                    } else {
+                        None
+                    }
+                })
+            })?;
+
+            let Some((index, mut inode)) = scan_result else {
+                continue;
+            };
+            let inode_arc = ArcRwLockWriteGuard::rwlock(&inode).clone();
+
+            *inode = init(index);
+            assert!(inode.kind != InodeType::Free as _);
+            self.dirty_blocks.lock().insert(block_index);
+            drop(inode);
+
+            *self.alloc_cursor.lock() = block_index;
+            return Ok((index, inode_arc));
+        }
+
+        Err(Error::OutOfSpace)
     }
 
     fn free<D: BlockAccess<BLOCK_SIZE>>(
