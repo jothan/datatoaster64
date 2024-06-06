@@ -139,7 +139,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
 
-        let alloc = Mutex::new(BitmapAllocator::new(&device, &layout));
+        let alloc = Mutex::new(BitmapAllocator::new(&layout));
         Ok(Self { alloc, device })
     }
 }
@@ -162,7 +162,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             device.write(BlockIndex(block_idx), &ZERO_BLOCK)?;
         }
 
-        let mut alloc = BitmapAllocator::new(device, &layout);
+        let mut alloc = BitmapAllocator::new(&layout);
 
         // Create the root directory contents
         let root_dir_data = alloc.alloc(device)?;

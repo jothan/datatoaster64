@@ -47,7 +47,7 @@ impl BitmapBlocks {
     }
 }
 
-pub struct BitmapAllocator {
+pub(crate) struct BitmapAllocator {
     layout: DeviceLayout,
     cursor: BitmapBitIndex,
     blocks: BitmapBlocks,
@@ -91,7 +91,7 @@ impl BitmapBitIndex {
 }
 
 impl BitmapAllocator {
-    pub fn new<D: BlockAccess<BLOCK_SIZE>>(device: &D, layout: &DeviceLayout) -> Self {
+    pub fn new(layout: &DeviceLayout) -> Self {
         Self {
             layout: layout.clone(),
             cursor: BitmapBitIndex(0),
@@ -133,7 +133,7 @@ impl BitmapAllocator {
     }
 
     /// Allocate a single block for file or directory data
-    pub fn alloc<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn alloc<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
         device: &D,
     ) -> Result<DataBlockIndex, Error> {
@@ -173,7 +173,7 @@ impl BitmapAllocator {
         Err(Error::OutOfSpace)
     }
 
-    pub fn free<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
         device: &D,
         data_index: DataBlockIndex,
@@ -197,7 +197,7 @@ impl BitmapAllocator {
         Ok(())
     }
 
-    pub fn sync<D: BlockAccess<BLOCK_SIZE>>(&mut self, device: &D) -> Result<(), Error> {
+    pub(crate) fn sync<D: BlockAccess<BLOCK_SIZE>>(&mut self, device: &D) -> Result<(), Error> {
         self.blocks.sync(device)
     }
 }
@@ -246,7 +246,7 @@ mod tests {
             size: 256 * 1024 * 1024,
         };
         let layout = DeviceLayout::from_device(&device)?;
-        let mut alloc = BitmapAllocator::new(&device, &layout);
+        let mut alloc = BitmapAllocator::new(&layout);
 
         for _ in 0..(layout.data_blocks.end.0 - layout.data_blocks.start.0) {
             assert!(alloc.alloc(&device).is_ok());
@@ -262,7 +262,7 @@ mod tests {
             size: 256 * 1024 * 1024,
         };
         let layout = DeviceLayout::from_device(&device)?;
-        let mut alloc = BitmapAllocator::new(&device, &layout);
+        let mut alloc = BitmapAllocator::new(&layout);
         assert!(alloc.blocks.dirty_blocks.len() == 0);
         let data_block = alloc.alloc(&device)?;
         assert!(alloc.blocks.dirty_blocks.len() == 1);

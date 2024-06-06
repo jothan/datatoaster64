@@ -1,16 +1,13 @@
-use std::{
-    ffi::OsStr,
-    fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
-    mem::MaybeUninit,
-    num::NonZeroU64,
-    ops::DerefMut,
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::ffi::OsStr;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::mem::MaybeUninit;
+use std::num::NonZeroU64;
+use std::path::Path;
+use std::sync::Mutex;
 
 use clap::Parser;
-use datatoaster_core::{DeviceLayout, Error, Filesystem, BLOCK_SIZE};
+use datatoaster_core::{Filesystem, BLOCK_SIZE};
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 #[derive(Debug, clap::Parser)]
