@@ -5,6 +5,12 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
+fuser = "0.14"
+datatoaster-core = { path = "../datatoaster-core", features = ["std"] }
+datatoaster-traits = { path = "../datatoaster-traits" }
+libc = { version = "0.2", features = ["const-extern-fn", "extra_traits"] }
+signal-hook = "0.3"
+anyhow = "1.0"
 
 [lints]
 workspace = true

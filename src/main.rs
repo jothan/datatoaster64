@@ -8,6 +8,7 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use datatoaster_core::{Filesystem, BLOCK_SIZE};
+use datatoaster_fuse::FuseFilesystem;
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 #[derive(Debug, clap::Parser)]
@@ -25,7 +26,10 @@ enum Command {
         #[arg(short, long, default_value_t = NonZeroU64::new(256).unwrap())]
         device_size_mb: NonZeroU64,
     },
-    Mount,
+    Mount {
+        #[arg()]
+        mountpoint: Box<Path>,
+    },
 }
 
 struct FileDevice {
@@ -116,9 +120,16 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
     }
 }
 
-fn mount_device(path: Box<Path>) -> anyhow::Result<()> {
+fn mount_device(path: Box<Path>, mountpoint: Box<Path>) -> anyhow::Result<()> {
+    eprintln!("Opening {path:?}");
     let device = FileDevice::open_for_mount(path)?;
-    let _fs = Filesystem::open(device)?;
+    eprintln!("Opening file system");
+    let fs = FuseFilesystem::new(device)?;
+
+    eprintln!("File system started at {mountpoint:?}, waiting for Ctrl-C");
+    fs.run(mountpoint, &[])?;
+
+    eprintln!("File system done");
 
     Ok(())
 }
@@ -133,7 +144,7 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Command::Mount => mount_device(args.data_path)?,
+        Command::Mount { mountpoint } => mount_device(args.data_path, mountpoint)?,
         Command::Format { device_size_mb } => format_device(args.data_path, device_size_mb)?,
     }
 

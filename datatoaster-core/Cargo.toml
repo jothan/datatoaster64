@@ -21,7 +21,7 @@ bytemuck = { version = "1.16.0", features = [
     "zeroable_atomics",
     "must_cast",
 ] }
-libc = { version = "0.2.155", default-features = false, features = [
+libc = { version = "0.2", default-features = false, features = [
     "const-extern-fn",
     "extra_traits",
 ] }
