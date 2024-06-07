@@ -1,10 +1,19 @@
 [package]
 name = "datatoaster64"
+authors = ["Jonathan Bastien-Filatrault <joe@x2a.org>"]
+repository = "https://github.com/jothan/datatoaster64"
+license = "GPL-3.0-or-later"
+
 publish = false
 edition = "2021"
 
 [workspace.package]
 version = "0.1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
 
 [dependencies]
 anyhow = "1.0"
