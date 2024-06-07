@@ -269,25 +269,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             return Err(Error::NotDirectory);
         }
 
-        let mut found = None;
-        let mut chutulu = Inode::dir_entry_iter(0, guard.data_block_iter(&self.0));
+        let (_, _, dirent) = guard.directory_lookup(&self.0, name)?;
 
-        while let Some((_, direntry)) = chutulu.next().transpose()? {
-            if direntry.is_empty() {
-                continue;
-            }
-
-            if direntry.name() == name {
-                found = Some(direntry);
-                break;
-            }
-        }
-
-        let Some(dirent) = found else {
-            return Err(Error::NotFound);
-        };
-
-        drop(chutulu);
         drop(guard);
         drop(inode);
         self.stat(dirent.inode().unwrap().get())

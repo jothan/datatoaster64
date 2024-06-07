@@ -110,4 +110,43 @@ impl DirEntryBlock {
 
         DirEntryBlock(block)
     }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &DiskDirEntry> {
+        self.0.iter()
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut DiskDirEntry> {
+        self.0.iter_mut()
+    }
+
+    pub(crate) fn first_free_entry(&mut self) -> Option<(usize, &mut DiskDirEntry)> {
+        self.iter_mut()
+            .enumerate()
+            .find(|(_, dentry)| dentry.is_empty())
+    }
+
+    pub(crate) fn with_name(&self, name: &[u8]) -> Option<(usize, DiskDirEntry)> {
+        self.iter().enumerate().find_map(|(offset, dentry)| {
+            if !dentry.is_empty() && dentry.name() == name {
+                Some((offset, *dentry))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub(crate) fn with_name_mut(&mut self, name: &[u8]) -> Option<(usize, &mut DiskDirEntry)> {
+        self.iter_mut()
+            .enumerate()
+            .find(|(_, dentry)| dentry.name() == name)
+    }
+}
+
+impl IntoIterator for DirEntryBlock {
+    type Item = DiskDirEntry;
+    type IntoIter = std::array::IntoIter<DiskDirEntry, DIRENTRY_PER_BLOCK>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
 }

@@ -182,7 +182,7 @@ impl Inode {
         Ok(())
     }
 
-    pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+    fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
     ) -> impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + 'a {
@@ -199,40 +199,70 @@ impl Inode {
         })
     }
 
-    pub(crate) fn dir_entry_iter<'a>(
+    pub(crate) fn directory_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
+    ) -> Result<impl Iterator<Item = Result<Option<DirEntryBlock>, Error>> + 'a, Error> {
+        if InodeType::try_from(self.kind)? != InodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+
+        Ok(self
+            .data_block_iter(fs)
+            .map_ok(|byte_block| byte_block.map(bytemuck::cast)))
+    }
+
+    pub(crate) fn directory_lookup<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
+        name: &[u8],
+    ) -> Result<(usize, usize, DiskDirEntry), Error> {
+        self.directory_block_iter(fs)?
+            .enumerate()
+            .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
+            .filter_map_ok(|opt| opt) // Take out the option
+            .filter_map_ok(move |(block_num, block)| {
+                block
+                    .with_name(name)
+                    .map(|(offset, dentry)| (block_num, offset, dentry))
+            })
+            .next()
+            .ok_or(Error::NotFound)?
+    }
+
+    pub(crate) fn directory_readdir_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
         start: u64,
-        block_iter: impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + 'a,
-    ) -> impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + 'a {
+    ) -> Result<impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + 'a, Error> {
         let skip_blocks = start / DIRENTRY_PER_BLOCK as u64;
         let skip_entries = start % DIRENTRY_PER_BLOCK as u64;
+        let base_iter = self.directory_block_iter(fs)?;
 
         // Yes, this is deranged.
-        block_iter
+        let iter = base_iter
             .enumerate()
             .skip(skip_blocks as usize)
-            .filter_map(move |(block_num, r)| match r {
-                Ok(Some(b)) => {
-                    let skip = if block_num as u64 == skip_blocks {
-                        skip_entries
-                    } else {
-                        0
-                    };
-                    let out = bytemuck::cast::<[u8; BLOCK_SIZE], DirEntryBlock>(b)
-                        .0
-                        .into_iter()
-                        .enumerate()
-                        .map(move |(offset, dent)| {
-                            (((block_num * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
-                        })
-                        .skip(skip as usize);
-
-                    Some(Ok(out))
-                }
-
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
+            .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
+            .filter_map_ok(|opt| opt) // Take out the option
+            .map_ok(move |(block_num, block)| {
+                let skip = if block_num as u64 == skip_blocks {
+                    skip_entries
+                } else {
+                    0
+                };
+                block
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(offset, dent)| {
+                        (((block_num * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
+                    })
+                    .skip(skip as usize)
+                    .filter(|(_, dent)| !dent.is_empty())
             })
-            .flatten_ok()
+            .flatten_ok();
+
+        Ok(iter)
     }
 }
 
