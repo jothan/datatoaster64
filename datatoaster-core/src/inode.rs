@@ -212,15 +212,24 @@ impl Inode {
             .map_ok(|byte_block| byte_block.map(bytemuck::cast)))
     }
 
+    pub(crate) fn directory_alloc_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
+    ) -> Result<impl Iterator<Item = Result<(usize, DirEntryBlock), Error>> + 'a, Error> {
+        Ok(
+            self.directory_block_iter(fs)?
+                .enumerate()
+                .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
+                .filter_map_ok(|opt| opt), // Take out the option
+        )
+    }
+
     pub(crate) fn directory_lookup<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
         name: &[u8],
     ) -> Result<(usize, usize, DiskDirEntry), Error> {
-        self.directory_block_iter(fs)?
-            .enumerate()
-            .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
-            .filter_map_ok(|opt| opt) // Take out the option
+        self.directory_alloc_block_iter(fs)?
             .filter_map_ok(move |(block_num, block)| {
                 block
                     .with_name(name)
@@ -254,15 +263,30 @@ impl Inode {
                 block
                     .into_iter()
                     .enumerate()
+                    .skip(skip as usize)
                     .map(move |(offset, dent)| {
                         (((block_num * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
                     })
-                    .skip(skip as usize)
                     .filter(|(_, dent)| !dent.is_empty())
             })
             .flatten_ok();
 
         Ok(iter)
+    }
+
+    pub(crate) fn directory_free_slot<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
+    ) -> Result<(usize, usize, DirEntryBlock), Error> {
+        self.directory_alloc_block_iter(fs)?
+            .filter_map_ok(|(block_num, mut block)| {
+                block
+                    .first_free_entry()
+                    .map(|(offset, _)| offset)
+                    .map(|offset| (block_num, offset, block))
+            })
+            .next()
+            .ok_or(Error::OutOfSpace)?
     }
 }
 
