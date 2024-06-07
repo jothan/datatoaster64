@@ -96,8 +96,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyEmpty,
     ) {
         eprintln!("releasedir ino:{ino} fh:{fh} flags:{flags}");
-        self.open_dirs.remove(fh.into());
-        reply.error(libc::ENOSYS)
+
+        if let Some(_handle) = self.open_dirs.remove(fh.into()) {
+            reply.ok()
+        } else {
+            reply.error(libc::ENOSYS)
+        }
     }
 
     fn readdir(
