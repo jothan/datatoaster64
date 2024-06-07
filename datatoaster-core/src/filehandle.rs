@@ -29,6 +29,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
 
         self.fs.raw_file_close(inode)
     }
+
+    fn is_closed(&self) -> bool {
+        self.inode.is_none()
+    }
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> Drop for RawFileHandle<D> {
@@ -98,5 +102,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
         }
 
         Ok(())
+    }
+
+    pub fn close(&mut self) -> Result<(), Error> {
+        if self.0.is_closed() {
+            return Err(Error::Invalid);
+        }
+        self.0.close()
     }
 }

@@ -97,7 +97,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
     ) {
         eprintln!("releasedir ino:{ino} fh:{fh} flags:{flags}");
 
-        if let Some(_handle) = self.open_dirs.remove(fh.into()) {
+        if self
+            .open_dirs
+            .remove(fh.into())
+            .and_then(|mut h| h.close().ok())
+            .is_some()
+        {
             reply.ok()
         } else {
             reply.error(libc::ENOSYS)
