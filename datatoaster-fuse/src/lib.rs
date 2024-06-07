@@ -1,15 +1,38 @@
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use datatoaster_core::{Error, Filesystem, InodeType, BLOCK_SIZE};
+use datatoaster_core::{DirectoryHandle, Error, Filesystem, InodeType, BLOCK_SIZE};
 use datatoaster_traits::BlockAccess;
 
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
+use slotmap::{new_key_type, Key, KeyData, SlotMap};
 
-pub struct FuseFilesystem<D> {
+macro_rules! key64 {
+    ($t:ident) => {
+        new_key_type! { struct $t; }
+        impl From<u64> for $t {
+            fn from(value: u64) -> Self {
+                KeyData::from_ffi(value).into()
+            }
+        }
+        impl From<$t> for u64 {
+            fn from(value: $t) -> Self {
+                value.data().as_ffi()
+            }
+        }
+    };
+}
+
+key64!(FileKey);
+key64!(DirKey);
+
+pub struct FuseFilesystem<D: BlockAccess<BLOCK_SIZE>> {
     inner: Filesystem<D>,
-    fhcounter: u64,
+    open_files: SlotMap<FileKey, ()>,
+    open_dirs: SlotMap<DirKey, DirectoryHandle<D>>,
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> FuseFilesystem<D> {
@@ -17,7 +40,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> FuseFilesystem<D> {
         assert!(fuser::FUSE_ROOT_ID == datatoaster_core::ROOT_INODE.get());
         Ok(Self {
             inner: Filesystem::open(device)?,
-            fhcounter: 0,
+            open_files: SlotMap::with_key(),
+            open_dirs: SlotMap::with_key(),
         })
     }
 }
@@ -40,6 +64,11 @@ impl<D: BlockAccess<BLOCK_SIZE> + Send + Sync + 'static> FuseFilesystem<D> {
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
+    fn destroy(&mut self) {
+        eprintln!("Syncing");
+        self.inner.sync().expect("sync error");
+    }
+
     fn opendir(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -48,9 +77,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyOpen,
     ) {
         eprintln!("opendir ino:{ino} flags:{flags}");
-        self.fhcounter += 1;
-        reply.opened(self.fhcounter, 0)
-        //reply.error(libc::ENOSYS)
+
+        match self.inner.opendir(ino) {
+            Ok(handle) => {
+                let fh = self.open_dirs.insert(handle).into();
+                reply.opened(fh, 0)
+            }
+            Err(_) => reply.error(libc::ENOSYS),
+        }
     }
 
     fn releasedir(
@@ -62,6 +96,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyEmpty,
     ) {
         eprintln!("releasedir ino:{ino} fh:{fh} flags:{flags}");
+        self.open_dirs.remove(fh.into());
         reply.error(libc::ENOSYS)
     }
 
@@ -71,10 +106,33 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         ino: u64,
         fh: u64,
         offset: i64,
-        reply: fuser::ReplyDirectory,
+        mut reply: fuser::ReplyDirectory,
     ) {
         eprintln!("readdir ino:{ino} fh:{fh} offset:{offset}");
-        reply.error(libc::ENOSYS)
+
+        let Some(handle) = self.open_dirs.get(fh.into()) else {
+            reply.error(libc::ENOSYS);
+            return;
+        };
+
+        let res = handle.readdir(offset.try_into().unwrap(), |offset, dirent| {
+            eprintln!(
+                "add #{offset} {dirent:?} {:?}",
+                String::from_utf8_lossy(dirent.name())
+            );
+            let offset = i64::try_from(offset).unwrap() + 1;
+            reply.add(
+                dirent.inode(),
+                offset,
+                FileType::from(dirent.kind()).into(),
+                OsStr::from_bytes(dirent.name()),
+            )
+        });
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(_) => reply.error(libc::ENOSYS),
+        }
     }
 
     fn readdirplus(
@@ -97,6 +155,20 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyEntry,
     ) {
         eprintln!("lookup parent:{parent} name:{name:?}");
+        reply.error(libc::ENOSYS);
+    }
+
+    fn create(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        flags: i32,
+        reply: fuser::ReplyCreate,
+    ) {
+        eprintln!("create:{parent} name:{name:?} mode:{mode} umask:{umask} flags:{flags}");
         reply.error(libc::ENOSYS);
     }
 

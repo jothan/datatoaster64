@@ -7,18 +7,21 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
+use itertools::Itertools;
 use lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard};
 use spin::lock_api::{Mutex, RwLock};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::bitmap::BitmapAllocator;
+use crate::directory::{DirEntryBlock, DiskDirEntry, DIRENTRY_PER_BLOCK};
 use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
-const NB_DIRECT_BLOCKS: usize = 13;
-const FIRST_INODE: NonZeroU64 = unsafe { NonZeroU64::new_unchecked(2) };
+// FIXME: implement indirect blocks
+const NB_DIRECT_BLOCKS: usize = 61;
+pub const ROOT_INODE: NonZeroU64 = NonZeroU64::MIN;
 pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
-pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex = InodeIndex(FIRST_INODE);
+pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex = InodeIndex(ROOT_INODE);
 
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 struct InodeBlockIndex(u64);
@@ -31,7 +34,7 @@ impl From<InodeBlockIndex> for BlockIndex {
 
 #[derive(bytemuck::TransparentWrapper, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub(crate) struct InodeIndex(NonZeroU64);
+pub(crate) struct InodeIndex(pub(crate) NonZeroU64);
 
 impl InodeIndex {
     fn ordinal(&self) -> u64 {
@@ -55,7 +58,7 @@ impl FileBlockIndex {
     }
 }
 
-#[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug)]
+#[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum InodeType {
     Free = 0,
@@ -177,6 +180,59 @@ impl Inode {
 
         fs.device.write(data_block.into(), buffer)?;
         Ok(())
+    }
+
+    pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+        &'a self,
+        fs: &'a FilesystemInner<D>,
+    ) -> impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + 'a {
+        self.direct_blocks.iter().cloned().map(|db| {
+            let Some(index) = db else {
+                return Ok(None);
+            };
+
+            let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+            fs.device
+                .read(index.into(), &mut buffer)
+                .map(|_| Some(unsafe { buffer.assume_init() }))
+                .map_err(|e| Error::Block { e })
+        })
+    }
+
+    pub(crate) fn dir_entry_iter<'a>(
+        start: u64,
+        block_iter: impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + 'a,
+    ) -> impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + 'a {
+        let skip_blocks = start / DIRENTRY_PER_BLOCK as u64;
+        let skip_entries = start % DIRENTRY_PER_BLOCK as u64;
+
+        // Yes, this is deranged.
+        block_iter
+            .enumerate()
+            .skip(skip_blocks as usize)
+            .filter_map(move |(block_num, r)| match r {
+                Ok(Some(b)) => {
+                    let skip = if block_num as u64 == skip_blocks {
+                        skip_entries
+                    } else {
+                        0
+                    };
+                    let out = bytemuck::cast::<[u8; BLOCK_SIZE], DirEntryBlock>(b)
+                        .0
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(offset, dent)| {
+                            (((block_num * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
+                        })
+                        .skip(skip as usize);
+
+                    Some(Ok(out))
+                }
+
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .flatten_ok()
     }
 }
 

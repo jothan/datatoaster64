@@ -29,6 +29,8 @@ use inode::{
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
+pub use directory::DirEntry;
+pub use filehandle::DirectoryHandle;
 pub use inode::{InodeType, Stat, ROOT_INODE};
 
 #[derive(Debug, PartialEq, Eq, Snafu)]
@@ -43,6 +45,8 @@ pub enum Error {
     OutOfSpace,
     #[snafu(display("Invalid superblock"))]
     SuperBlock,
+    #[snafu(display("Not a directory"))]
+    NotDirectory,
     #[snafu(display("Block device error {e}"))]
     Block { e: BlockError },
 }
@@ -219,6 +223,19 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let guard = inode.1.read();
 
         Stat::try_from((inode.0, &*guard))
+    }
+
+    pub fn opendir(&self, inode_index: u64) -> Result<DirectoryHandle<D>, Error> {
+        let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
+        let raw = self.0.clone().raw_file_open(inode_index)?;
+        let inode = raw.inode.as_ref().unwrap();
+        let guard = inode.1.read();
+
+        if InodeType::try_from(guard.kind)? != InodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+        drop(guard);
+        Ok(DirectoryHandle(raw))
     }
 
     pub fn format(device: &D) -> Result<(), Error> {

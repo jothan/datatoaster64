@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use datatoaster_traits::BlockAccess;
 
-use crate::inode::{InodeHandle, InodeIndex};
-use crate::{Error, FilesystemInner, BLOCK_SIZE};
+use crate::inode::{Inode, InodeHandle, InodeIndex};
+use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
-    fs: Arc<FilesystemInner<D>>,
-    inode: Option<InodeHandle>,
+    pub(crate) fs: Arc<FilesystemInner<D>>,
+    pub(crate) inode: Option<InodeHandle>,
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
@@ -68,5 +68,35 @@ impl OpenCounter {
             },
             Entry::Vacant(_) => Err(Error::Invalid),
         }
+    }
+}
+
+pub struct DirectoryHandle<D: BlockAccess<BLOCK_SIZE>>(pub(crate) RawFileHandle<D>);
+
+impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
+    pub fn readdir(
+        &self,
+        start: u64,
+        mut f: impl FnMut(u64, DirEntry) -> bool,
+    ) -> Result<(), Error> {
+        let Some(InodeHandle(_, inode)) = self.0.inode.as_ref() else {
+            return Err(Error::Invalid);
+        };
+        let guard = inode.read();
+
+        // Summon the ancient one
+        let mut chutulu = Inode::dir_entry_iter(start, guard.data_block_iter(&self.0.fs));
+
+        while let Some((offset, direntry)) = chutulu.next().transpose()? {
+            if direntry.is_empty() {
+                continue;
+            }
+
+            if f(offset, (&direntry).try_into()?) {
+                break;
+            }
+        }
+
+        Ok(())
     }
 }
