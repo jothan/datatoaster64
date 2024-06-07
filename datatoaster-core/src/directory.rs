@@ -20,20 +20,27 @@ pub(crate) struct DiskDirEntry {
 }
 
 impl DiskDirEntry {
-    pub(crate) fn new_file(inode: InodeIndex, name: &[u8]) -> Result<DiskDirEntry, Error> {
+    fn new(inode: InodeIndex, name: &[u8], kind: InodeType) -> Result<DiskDirEntry, Error> {
         if name.len() > MAX_FILENAME_LENGTH {
             return Err(Error::NameTooLong);
         }
 
         let mut dirent = DiskDirEntry {
             inode: Some(inode),
-            kind: InodeType::File as _,
+            kind: kind as _,
             name: [0; MAX_FILENAME_LENGTH],
         };
 
         dirent.name[..name.len()].copy_from_slice(name);
-
         Ok(dirent)
+    }
+
+    pub(crate) fn new_file(inode: InodeIndex, name: &[u8]) -> Result<DiskDirEntry, Error> {
+        Self::new(inode, name, InodeType::File)
+    }
+
+    pub(crate) fn new_directory(inode: InodeIndex, name: &[u8]) -> Result<DiskDirEntry, Error> {
+        Self::new(inode, name, InodeType::Directory)
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -100,28 +107,12 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
 #[repr(transparent)]
 pub(crate) struct DirEntryBlock(pub(crate) [DiskDirEntry; DIRENTRY_PER_BLOCK]);
 
-const EMPTY_NAME: [u8; MAX_FILENAME_LENGTH] = [0; MAX_FILENAME_LENGTH];
-
 impl DirEntryBlock {
     pub(crate) fn new_first_block(inode: InodeIndex, parent: InodeIndex) -> DirEntryBlock {
         let mut block = [Zeroable::zeroed(); DIRENTRY_PER_BLOCK];
-        let mut self_name = EMPTY_NAME;
-        self_name[0] = b'.';
 
-        let mut parent_name = EMPTY_NAME;
-        parent_name[0] = b'.';
-        parent_name[1] = b'.';
-
-        block[0] = DiskDirEntry {
-            inode: Some(inode),
-            kind: InodeType::Directory as _,
-            name: self_name,
-        };
-        block[1] = DiskDirEntry {
-            inode: Some(parent),
-            kind: InodeType::Directory as _,
-            name: parent_name,
-        };
+        block[0] = DiskDirEntry::new_directory(inode, b".").unwrap();
+        block[1] = DiskDirEntry::new_directory(parent, b"..").unwrap();
 
         DirEntryBlock(block)
     }
@@ -148,12 +139,6 @@ impl DirEntryBlock {
                 None
             }
         })
-    }
-
-    pub(crate) fn with_name_mut(&mut self, name: &[u8]) -> Option<(usize, &mut DiskDirEntry)> {
-        self.iter_mut()
-            .enumerate()
-            .find(|(_, dentry)| dentry.name() == name)
     }
 }
 

@@ -235,6 +235,8 @@ pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn mount(device: D) -> Result<Self, Error> {
+        SuperBlock::read(&device)?;
+
         Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
     }
 

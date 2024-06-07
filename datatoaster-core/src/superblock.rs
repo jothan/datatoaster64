@@ -36,7 +36,7 @@ impl SuperBlock {
         Ok(())
     }
 
-    fn read<D: BlockAccess<BLOCK_SIZE>>(&self, device: &D) -> Result<SuperBlock, Error> {
+    pub(crate) fn read<D: BlockAccess<BLOCK_SIZE>>(device: &D) -> Result<SuperBlock, Error> {
         let mut block: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
         device.read(BlockIndex(0), &mut block)?;
         let block = unsafe { block.assume_init() };

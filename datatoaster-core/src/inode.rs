@@ -54,16 +54,6 @@ unsafe impl bytemuck::PodInOption for InodeIndex {}
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub(crate) struct FileBlockIndex(usize);
 
-impl FileBlockIndex {
-    fn new(block: usize) -> Result<FileBlockIndex, Error> {
-        if block < NB_DIRECT_BLOCKS {
-            Ok(FileBlockIndex(block))
-        } else {
-            Err(Error::Invalid)
-        }
-    }
-}
-
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
 pub enum InodeType {
