@@ -42,6 +42,12 @@ impl InodeIndex {
     }
 }
 
+impl From<InodeIndex> for u64 {
+    fn from(value: InodeIndex) -> Self {
+        value.0.get()
+    }
+}
+
 unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
@@ -136,7 +142,7 @@ impl TryFrom<(InodeIndex, &Inode)> for Stat {
 #[repr(C)]
 pub(crate) struct Inode {
     // For files: the size in bytes
-    // For directories: the number of directory entries (besides . and ..)
+    // For directories: the number of directory entries
     pub(crate) size: u64,
     pub(crate) direct_blocks: [Option<DataBlockIndex>; NB_DIRECT_BLOCKS],
 
@@ -148,6 +154,14 @@ pub(crate) struct Inode {
 }
 
 impl Inode {
+    pub(crate) fn new_file(perm: u16) -> Self {
+        let mut f = Inode::zeroed();
+        f.nlink = 1;
+        f.kind = InodeType::File as _;
+        f.perm = perm;
+        f
+    }
+
     // Returns None if reading a hole
     // FIXME: returning a big value.
     fn read_block<D: BlockAccess<BLOCK_SIZE>>(
@@ -197,6 +211,14 @@ impl Inode {
                 .map(|_| Some(unsafe { buffer.assume_init() }))
                 .map_err(|e| Error::Block { e })
         })
+    }
+
+    pub(crate) fn nb_alloc_blocks(&self) -> usize {
+        self.direct_blocks.iter().filter(|&&b| b.is_some()).count()
+    }
+
+    pub(crate) fn first_hole(&mut self) -> Option<&mut Option<DataBlockIndex>> {
+        self.direct_blocks.iter_mut().find(|b| b.is_none())
     }
 }
 
@@ -300,6 +322,42 @@ impl<'inode> DirectoryInode<'inode> {
             })
             .next()
             .ok_or(Error::OutOfSpace)?
+    }
+
+    pub(crate) fn nb_slots_free(self) -> usize {
+        let nb_alloc_slots = self.0.nb_alloc_blocks() * DIRENTRY_PER_BLOCK;
+        nb_alloc_slots.checked_sub(self.0.size as usize).unwrap()
+    }
+
+    pub(crate) fn is_full(self) -> bool {
+        self.0.nb_alloc_blocks() == NB_DIRECT_BLOCKS && self.nb_slots_free() == 0
+    }
+
+    pub(crate) fn as_inner(self) -> &'inode Inode {
+        self.0
+    }
+}
+
+pub(crate) struct DirectoryInodeMut<'inode>(&'inode mut Inode);
+
+impl<'inode> TryFrom<&'inode mut Inode> for DirectoryInodeMut<'inode> {
+    type Error = Error;
+
+    fn try_from(value: &'inode mut Inode) -> Result<Self, Self::Error> {
+        if InodeType::try_from(value.kind)? != InodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+        Ok(DirectoryInodeMut(value))
+    }
+}
+
+impl<'inode> DirectoryInodeMut<'inode> {
+    pub(crate) fn as_ref(&self) -> DirectoryInode<'_> {
+        DirectoryInode(self.0)
+    }
+
+    pub(crate) fn as_inner(&mut self) -> &mut Inode {
+        self.0
     }
 }
 
@@ -421,7 +479,7 @@ impl InodeAllocator {
         }
     }
 
-    fn alloc<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn alloc<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         device: &D,
         init: impl FnOnce(InodeIndex) -> Inode,

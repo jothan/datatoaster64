@@ -8,7 +8,8 @@ use super::inode::{InodeIndex, InodeType};
 use crate::{Error, BLOCK_SIZE};
 
 pub(crate) const MAX_FILENAME_LENGTH: usize = 54;
-pub(crate) const DIRENTRY_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<DiskDirEntry>();
+pub(crate) const DIRENTRY_SIZE: usize = std::mem::size_of::<DiskDirEntry>();
+pub(crate) const DIRENTRY_PER_BLOCK: usize = BLOCK_SIZE / DIRENTRY_SIZE;
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
 #[repr(C)]
@@ -19,6 +20,22 @@ pub(crate) struct DiskDirEntry {
 }
 
 impl DiskDirEntry {
+    pub(crate) fn new_file(inode: InodeIndex, name: &[u8]) -> Result<DiskDirEntry, Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let mut dirent = DiskDirEntry {
+            inode: Some(inode),
+            kind: InodeType::File as _,
+            name: [0; MAX_FILENAME_LENGTH],
+        };
+
+        dirent.name[..name.len()].copy_from_slice(name);
+
+        Ok(dirent)
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.inode.is_none()
     }
@@ -79,16 +96,14 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
     }
 }
 
-#[derive(
-    bytemuck::NoUninit, bytemuck::AnyBitPattern, bytemuck::TransparentWrapper, Clone, Copy,
-)]
+#[derive(bytemuck::Zeroable, bytemuck::Pod, bytemuck::TransparentWrapper, Clone, Copy)]
 #[repr(transparent)]
 pub(crate) struct DirEntryBlock(pub(crate) [DiskDirEntry; DIRENTRY_PER_BLOCK]);
 
 const EMPTY_NAME: [u8; MAX_FILENAME_LENGTH] = [0; MAX_FILENAME_LENGTH];
 
 impl DirEntryBlock {
-    pub(crate) fn new_empty(inode: InodeIndex, parent: InodeIndex) -> DirEntryBlock {
+    pub(crate) fn new_first_block(inode: InodeIndex, parent: InodeIndex) -> DirEntryBlock {
         let mut block = [Zeroable::zeroed(); DIRENTRY_PER_BLOCK];
         let mut self_name = EMPTY_NAME;
         self_name[0] = b'.';

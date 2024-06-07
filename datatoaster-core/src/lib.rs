@@ -8,8 +8,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use directory::{DirEntryBlock, MAX_FILENAME_LENGTH};
+use directory::{DirEntryBlock, DiskDirEntry, MAX_FILENAME_LENGTH};
 use filehandle::{OpenCounter, RawFileHandle};
+use lock_api::RwLockUpgradableReadGuard;
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -23,14 +24,14 @@ mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 use inode::{
-    DirectoryInode, Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock,
-    INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
+    DirectoryInode, DirectoryInodeMut, Inode, InodeAllocator, InodeHandle, InodeIndex,
+    RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
 pub use directory::DirEntry;
-pub use filehandle::DirectoryHandle;
+pub use filehandle::{DirectoryHandle, FileHandle};
 pub use inode::{InodeType, Stat, ROOT_INODE};
 
 #[derive(Debug, PartialEq, Eq, Snafu)]
@@ -51,6 +52,10 @@ pub enum Error {
     NotFound,
     #[snafu(display("Name too long"))]
     NameTooLong,
+    #[snafu(display("The file or directory already exists"))]
+    AlreadyExists,
+    #[snafu(display("A directory was found when expecting a file"))]
+    IsDirectory,
     #[snafu(display("Block device error {e}"))]
     Block { e: BlockError },
 }
@@ -70,6 +75,8 @@ impl From<Error> for std::ffi::c_int {
             Error::Block { e: _ } | Error::DeviceBounds => libc::EIO,
             Error::Invalid => libc::EINVAL,
             Error::NotFound => libc::ENOENT,
+            Error::AlreadyExists => libc::EEXIST,
+            Error::IsDirectory => libc::EISDIR,
             _ => libc::ENOSYS,
         }
     }
@@ -227,7 +234,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
-    pub fn open(device: D) -> Result<Self, Error> {
+    pub fn mount(device: D) -> Result<Self, Error> {
         Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
     }
 
@@ -256,6 +263,19 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         Ok(DirectoryHandle(raw))
     }
 
+    pub fn open(&self, inode_index: u64) -> Result<FileHandle<D>, Error> {
+        let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
+        let raw = self.0.clone().raw_file_open(inode_index)?;
+        let inode = raw.inode.as_ref().unwrap();
+        let guard = inode.1.read();
+
+        if InodeType::try_from(guard.kind)? != InodeType::File {
+            return Err(Error::IsDirectory);
+        }
+        drop(guard);
+        Ok(FileHandle(raw))
+    }
+
     pub fn lookup(&self, parent_inode: u64, name: &[u8]) -> Result<Stat, Error> {
         if name.len() > MAX_FILENAME_LENGTH {
             return Err(Error::NameTooLong);
@@ -265,16 +285,78 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
         let guard = inode.1.read();
 
-        if InodeType::try_from(guard.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
-        }
-
         let dir_inode = DirectoryInode::try_from(&*guard)?;
         let (_, _, dirent) = dir_inode.lookup(&self.0, name)?;
 
         drop(guard);
         drop(inode);
         self.stat(dirent.inode().unwrap().get())
+    }
+
+    pub fn create(
+        &self,
+        parent_inode: u64,
+        name: &[u8],
+        mode: u32,
+    ) -> Result<(FileHandle<D>, Stat), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let guard = inode.1.upgradable_read();
+
+        let dir_inode = DirectoryInode::try_from(&*guard)?;
+
+        if dir_inode.is_full() {
+            return Err(Error::OutOfSpace);
+        }
+
+        match dir_inode.lookup(&self.0, name) {
+            Ok(_) => return Err(Error::AlreadyExists),
+            Err(Error::NotFound) => (),
+            Err(e) => return Err(e),
+        };
+
+        let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
+        let mut dir_inode = DirectoryInodeMut::try_from(&mut *guard)?;
+
+        let new_inode = self.0.inodes.alloc(&self.0.device, |_| {
+            Inode::new_file(mode as u16 /* lossy !*/)
+        })?;
+        let new_dirent = DiskDirEntry::new_file(new_inode.0, name)?;
+        let stat = Stat::try_from((new_inode.0, dir_inode.as_ref().as_inner()))?;
+
+        if dir_inode.as_ref().nb_slots_free() == 0 {
+            // Allocate a fresh directory block
+            let to_alloc = dir_inode.as_inner().first_hole().ok_or(Error::Invalid)?;
+            let new_block = self.0.alloc_data(inode.0)?;
+            *to_alloc = Some(new_block);
+
+            let mut deb = DirEntryBlock::zeroed();
+            deb.0[0] = new_dirent;
+            self.0
+                .device
+                .write(new_block.into(), bytemuck::cast_ref(&deb))?;
+        } else {
+            // Insert into an existing block
+            let (block_num, offset, mut block_data) = dir_inode.as_ref().free_slot(&self.0)?;
+            block_data.0[offset] = new_dirent;
+            self.0.device.write(
+                dir_inode.as_inner().direct_blocks[block_num]
+                    .unwrap()
+                    .into(),
+                bytemuck::cast_ref(&block_data),
+            )?;
+        }
+
+        guard.size = guard.size.checked_add(1).unwrap();
+
+        drop(guard);
+
+        let fh = self.open(new_inode.0.into())?;
+        Ok((fh, stat))
     }
 
     pub fn format(device: &D) -> Result<(), Error> {
@@ -295,16 +377,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         alloc.sync(device)?;
 
         let root_dir_contents =
-            DirEntryBlock::new_empty(ROOT_DIRECTORY_INODE, ROOT_DIRECTORY_INODE);
-        device.write(
-            root_dir_data.into(),
-            bytemuck::bytes_of(&root_dir_contents).try_into().unwrap(),
-        )?;
+            DirEntryBlock::new_first_block(ROOT_DIRECTORY_INODE, ROOT_DIRECTORY_INODE);
+        device.write(root_dir_data.into(), bytemuck::cast_ref(&root_dir_contents))?;
 
         // Create the root directory inode
         let mut root_inode = Inode::zeroed();
         root_inode.kind = InodeType::Directory as _;
         root_inode.nlink = 2;
+        root_inode.size = 2;
         root_inode.perm = 0x1ed; // 755 octal
         root_inode.direct_blocks[0] = Some(root_dir_data);
 
@@ -312,7 +392,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         root_inode_block.0[0] = root_inode;
         device.write(
             layout.inode_blocks.start,
-            bytemuck::bytes_of(&root_inode_block).try_into().unwrap(),
+            bytemuck::cast_ref(&root_inode_block),
         )?;
 
         // Create the superblock

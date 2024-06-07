@@ -3,7 +3,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use datatoaster_core::{DirectoryHandle, Error, Filesystem, InodeType, BLOCK_SIZE};
+use datatoaster_core::{DirectoryHandle, Error, FileHandle, Filesystem, InodeType, BLOCK_SIZE};
 use datatoaster_traits::BlockAccess;
 
 use signal_hook::consts::signal::*;
@@ -31,7 +31,7 @@ key64!(DirKey);
 
 pub struct FuseFilesystem<D: BlockAccess<BLOCK_SIZE>> {
     inner: Filesystem<D>,
-    open_files: SlotMap<FileKey, ()>,
+    open_files: SlotMap<FileKey, FileHandle<D>>,
     open_dirs: SlotMap<DirKey, DirectoryHandle<D>>,
 }
 
@@ -39,7 +39,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FuseFilesystem<D> {
     pub fn new(device: D) -> Result<Self, Error> {
         assert!(fuser::FUSE_ROOT_ID == datatoaster_core::ROOT_INODE.get());
         Ok(Self {
-            inner: Filesystem::open(device)?,
+            inner: Filesystem::mount(device)?,
             open_files: SlotMap::with_key(),
             open_dirs: SlotMap::with_key(),
         })
@@ -84,6 +84,30 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
                 reply.opened(fh, 0)
             }
             Err(e) => reply.error(e.into()),
+        }
+    }
+
+    fn release(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
+        eprintln!("release ino:{ino} fh:{fh}");
+
+        if self
+            .open_files
+            .remove(fh.into())
+            .and_then(|mut h| h.close().ok())
+            .is_some()
+        {
+            reply.ok()
+        } else {
+            reply.error(libc::EBADF)
         }
     }
 
@@ -171,6 +195,32 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         }
     }
 
+    fn setattr(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: fuser::ReplyAttr,
+    ) {
+        // FIXME
+        eprintln!("setattr");
+        match self.inner.stat(ino) {
+            Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),
+            Err(e) => reply.error(e.into()),
+        }
+    }
+
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -182,7 +232,19 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyCreate,
     ) {
         eprintln!("create:{parent} name:{name:?} mode:{mode} umask:{umask} flags:{flags}");
-        reply.error(libc::ENOSYS);
+
+        match self.inner.create(parent, name.as_bytes(), mode) {
+            Ok((handle, stat)) => {
+                let attr = Stat::from(stat).into();
+                let fh = self.open_files.insert(handle).into();
+                eprintln!("create ok fh:{fh}");
+                reply.created(&Duration::new(0, 0), &attr, 0, fh, 0)
+            }
+            Err(e) => {
+                eprintln!("create error: {e:?}");
+                reply.error(e.into())
+            }
+        }
     }
 
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {

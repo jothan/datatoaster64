@@ -108,3 +108,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
         self.0.close()
     }
 }
+
+pub struct FileHandle<D: BlockAccess<BLOCK_SIZE>>(pub(crate) RawFileHandle<D>);
+
+impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
+    pub fn close(&mut self) -> Result<(), Error> {
+        if self.0.is_closed() {
+            return Err(Error::Invalid);
+        }
+        self.0.close()
+    }
+}
