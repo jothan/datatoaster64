@@ -330,23 +330,25 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         if dir_inode.as_ref().nb_slots_free() == 0 {
             // Allocate a fresh directory block
-            let to_alloc = dir_inode.as_inner().first_hole().ok_or(Error::Invalid)?;
-            let new_block = self.0.alloc_data(inode.0)?;
-            *to_alloc = Some(new_block);
+            let new_block = dir_inode.as_inner().first_hole().ok_or(Error::Invalid)?;
 
-            let mut deb = DirEntryBlock::zeroed();
-            deb.0[0] = new_dirent;
-            self.0
-                .device
-                .write(new_block.into(), bytemuck::cast_ref(&deb))?;
+            let mut block_data = DirEntryBlock::zeroed();
+            block_data.0[0] = new_dirent;
+
+            dir_inode.as_inner().write_block(
+                inode.0,
+                &self.0,
+                new_block,
+                bytemuck::cast_ref(&block_data),
+            )?;
         } else {
             // Insert into an existing block
             let (block_num, offset, mut block_data) = dir_inode.as_ref().free_slot(&self.0)?;
             block_data.0[offset] = new_dirent;
-            self.0.device.write(
-                dir_inode.as_inner().direct_blocks[block_num]
-                    .unwrap()
-                    .into(),
+            dir_inode.as_inner().write_block(
+                inode.0,
+                &self.0,
+                block_num,
                 bytemuck::cast_ref(&block_data),
             )?;
         }

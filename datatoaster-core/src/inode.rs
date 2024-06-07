@@ -52,11 +52,11 @@ unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
-struct FileBlockIndex(u64);
+pub(crate) struct FileBlockIndex(usize);
 
 impl FileBlockIndex {
-    fn new(block: u64) -> Result<FileBlockIndex, Error> {
-        if block < INODES_PER_BLOCK as u64 {
+    fn new(block: usize) -> Result<FileBlockIndex, Error> {
+        if block < NB_DIRECT_BLOCKS {
             Ok(FileBlockIndex(block))
         } else {
             Err(Error::Invalid)
@@ -169,7 +169,7 @@ impl Inode {
         fs: &FilesystemInner<D>,
         block: FileBlockIndex,
     ) -> Result<Option<[u8; BLOCK_SIZE]>, Error> {
-        let Some(data_block) = self.direct_blocks[block.0 as usize] else {
+        let Some(data_block) = self.direct_blocks[block.0] else {
             return Ok(None);
         };
         let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
@@ -177,18 +177,18 @@ impl Inode {
         Ok(Some(unsafe { buffer.assume_init() }))
     }
 
-    fn write_block<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn write_block<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
         inode_index: InodeIndex,
         fs: &FilesystemInner<D>,
         block: FileBlockIndex,
         buffer: &[u8; BLOCK_SIZE],
     ) -> Result<(), Error> {
-        let data_block = if let Some(data_block) = self.direct_blocks[block.0 as usize] {
+        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
             data_block
         } else {
             let data_block = fs.alloc_data(inode_index)?;
-            self.direct_blocks[block.0 as usize] = Some(data_block);
+            self.direct_blocks[block.0] = Some(data_block);
             data_block
         };
 
@@ -199,17 +199,10 @@ impl Inode {
     fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
-    ) -> impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + '_ {
-        self.direct_blocks.iter().cloned().map(|db| {
-            let Some(index) = db else {
-                return Ok(None);
-            };
-
-            let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
-            fs.device
-                .read(index.into(), &mut buffer)
-                .map(|_| Some(unsafe { buffer.assume_init() }))
-                .map_err(|e| Error::Block { e })
+    ) -> impl Iterator<Item = Result<(FileBlockIndex, Option<[u8; BLOCK_SIZE]>), Error>> + '_ {
+        (0..NB_DIRECT_BLOCKS).map(|block_num| {
+            let block_num = FileBlockIndex(block_num);
+            self.read_block(fs, block_num).map(|r| (block_num, r))
         })
     }
 
@@ -217,8 +210,11 @@ impl Inode {
         self.direct_blocks.iter().filter(|&&b| b.is_some()).count()
     }
 
-    pub(crate) fn first_hole(&mut self) -> Option<&mut Option<DataBlockIndex>> {
-        self.direct_blocks.iter_mut().find(|b| b.is_none())
+    pub(crate) fn first_hole(&self) -> Option<FileBlockIndex> {
+        self.direct_blocks
+            .iter()
+            .position(|b| b.is_none())
+            .map(FileBlockIndex)
     }
 }
 
@@ -240,22 +236,24 @@ impl<'inode> DirectoryInode<'inode> {
     fn block_iter<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &'inode FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<Option<DirEntryBlock>, Error>> + '_, Error> {
+    ) -> Result<
+        impl Iterator<Item = Result<(FileBlockIndex, Option<DirEntryBlock>), Error>> + '_,
+        Error,
+    > {
         Ok(self
             .0
             .data_block_iter(fs)
-            .map_ok(|byte_block| byte_block.map(bytemuck::cast)))
+            .map_ok(|(block_num, byte_block)| (block_num, byte_block.map(bytemuck::cast))))
     }
 
     fn alloc_block_iter<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &'inode FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<(usize, DirEntryBlock), Error>> + '_, Error> {
+    ) -> Result<impl Iterator<Item = Result<(FileBlockIndex, DirEntryBlock), Error>> + '_, Error>
+    {
         Ok(
             self.block_iter(fs)?
-                .enumerate()
-                .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
-                .filter_map_ok(|opt| opt), // Take out the option
+                .filter_map_ok(|(block_num, block_data)| block_data.map(|bd| (block_num, bd))), // Take out the option
         )
     }
 
@@ -270,12 +268,10 @@ impl<'inode> DirectoryInode<'inode> {
 
         // Yes, this is deranged.
         let iter = base_iter
-            .enumerate()
             .skip(skip_blocks as usize)
-            .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
-            .filter_map_ok(|opt| opt) // Take out the option
+            .filter_map_ok(|(block_num, block_data)| block_data.map(|bd| (block_num, bd))) // Take out the option
             .map_ok(move |(block_num, block)| {
-                let skip = if block_num as u64 == skip_blocks {
+                let skip = if block_num.0 as u64 == skip_blocks {
                     skip_entries
                 } else {
                     0
@@ -285,7 +281,7 @@ impl<'inode> DirectoryInode<'inode> {
                     .enumerate()
                     .skip(skip as usize)
                     .map(move |(offset, dent)| {
-                        (((block_num * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
+                        (((block_num.0 * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
                     })
                     .filter(|(_, dent)| !dent.is_empty())
             })
@@ -298,7 +294,7 @@ impl<'inode> DirectoryInode<'inode> {
         self,
         fs: &FilesystemInner<D>,
         name: &[u8],
-    ) -> Result<(usize, usize, DiskDirEntry), Error> {
+    ) -> Result<(FileBlockIndex, usize, DiskDirEntry), Error> {
         self.alloc_block_iter(fs)?
             .filter_map_ok(move |(block_num, block)| {
                 block
@@ -312,7 +308,7 @@ impl<'inode> DirectoryInode<'inode> {
     pub(crate) fn free_slot<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &FilesystemInner<D>,
-    ) -> Result<(usize, usize, DirEntryBlock), Error> {
+    ) -> Result<(FileBlockIndex, usize, DirEntryBlock), Error> {
         self.alloc_block_iter(fs)?
             .filter_map_ok(|(block_num, mut block)| {
                 block
