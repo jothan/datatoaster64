@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use directory::DirEntryBlock;
+use directory::{DirEntryBlock, MAX_FILENAME_LENGTH};
 use filehandle::{OpenCounter, RawFileHandle};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
@@ -47,6 +47,10 @@ pub enum Error {
     SuperBlock,
     #[snafu(display("Not a directory"))]
     NotDirectory,
+    #[snafu(display("File or directory not found"))]
+    NotFound,
+    #[snafu(display("Name too long"))]
+    NameTooLong,
     #[snafu(display("Block device error {e}"))]
     Block { e: BlockError },
 }
@@ -54,6 +58,20 @@ pub enum Error {
 impl From<BlockError> for Error {
     fn from(e: BlockError) -> Self {
         Error::Block { e }
+    }
+}
+
+impl From<Error> for std::ffi::c_int {
+    fn from(value: Error) -> Self {
+        match value {
+            Error::OutOfSpace => libc::ENOSPC,
+            Error::NameTooLong => libc::ENAMETOOLONG,
+            Error::NotDirectory => libc::ENOTDIR,
+            Error::Block { e: _ } | Error::DeviceBounds => libc::EIO,
+            Error::Invalid => libc::EINVAL,
+            Error::NotFound => libc::ENOENT,
+            _ => libc::ENOSYS,
+        }
     }
 }
 
@@ -236,6 +254,43 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         }
         drop(guard);
         Ok(DirectoryHandle(raw))
+    }
+
+    pub fn lookup(&self, parent_inode: u64, name: &[u8]) -> Result<Stat, Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let guard = inode.1.read();
+
+        if InodeType::try_from(guard.kind)? != InodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+
+        let mut found = None;
+        let mut chutulu = Inode::dir_entry_iter(0, guard.data_block_iter(&self.0));
+
+        while let Some((_, direntry)) = chutulu.next().transpose()? {
+            if direntry.is_empty() {
+                continue;
+            }
+
+            if direntry.name() == name {
+                found = Some(direntry);
+                break;
+            }
+        }
+
+        let Some(dirent) = found else {
+            return Err(Error::NotFound);
+        };
+
+        drop(chutulu);
+        drop(guard);
+        drop(inode);
+        self.stat(dirent.inode().unwrap().get())
     }
 
     pub fn format(device: &D) -> Result<(), Error> {

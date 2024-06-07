@@ -83,7 +83,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
                 let fh = self.open_dirs.insert(handle).into();
                 reply.opened(fh, 0)
             }
-            Err(_) => reply.error(libc::ENOSYS),
+            Err(e) => reply.error(e.into()),
         }
     }
 
@@ -105,7 +105,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         {
             reply.ok()
         } else {
-            reply.error(libc::ENOSYS)
+            reply.error(libc::EBADF)
         }
     }
 
@@ -120,7 +120,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         eprintln!("readdir ino:{ino} fh:{fh} offset:{offset}");
 
         let Some(handle) = self.open_dirs.get(fh.into()) else {
-            reply.error(libc::ENOSYS);
+            reply.error(libc::EBADF);
             return;
         };
 
@@ -140,7 +140,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
 
         match res {
             Ok(_) => reply.ok(),
-            Err(_) => reply.error(libc::ENOSYS),
+            Err(e) => reply.error(e.into()),
         }
     }
 
@@ -164,7 +164,11 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyEntry,
     ) {
         eprintln!("lookup parent:{parent} name:{name:?}");
-        reply.error(libc::ENOSYS);
+
+        match self.inner.lookup(parent, name.as_bytes()) {
+            Ok(stat) => reply.entry(&Duration::new(0, 0), &Stat::from(stat).into(), 0),
+            Err(e) => reply.error(e.into()),
+        }
     }
 
     fn create(
@@ -186,7 +190,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
 
         match self.inner.stat(ino) {
             Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),
-            Err(_) => reply.error(libc::ENOSYS),
+            Err(e) => reply.error(e.into()),
         }
     }
 }

@@ -7,7 +7,7 @@ use bytemuck::Zeroable;
 use super::inode::{InodeIndex, InodeType};
 use crate::{Error, BLOCK_SIZE};
 
-const MAX_FILENAME_LENGTH: usize = 54;
+pub(crate) const MAX_FILENAME_LENGTH: usize = 54;
 pub(crate) const DIRENTRY_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<DiskDirEntry>();
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
@@ -21,6 +21,20 @@ pub(crate) struct DiskDirEntry {
 impl DiskDirEntry {
     pub(crate) fn is_empty(&self) -> bool {
         self.inode.is_none()
+    }
+
+    pub(crate) fn name(&self) -> &[u8] {
+        let zero = self
+            .name
+            .iter()
+            .position(|c| *c == 0)
+            .unwrap_or(MAX_FILENAME_LENGTH);
+
+        &self.name[..zero]
+    }
+
+    pub(crate) fn inode(&self) -> Option<NonZeroU64> {
+        self.inode.map(|i| i.0)
     }
 }
 
@@ -55,12 +69,7 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
         let kind = value.kind.try_into()?;
         let mut name = heapless::Vec::new();
 
-        let zero = value
-            .name
-            .iter()
-            .position(|c| *c == 0)
-            .unwrap_or(MAX_FILENAME_LENGTH);
-        name.extend_from_slice(&value.name[..zero]).unwrap();
+        name.extend_from_slice(value.name()).unwrap();
 
         Ok(DirEntry {
             inode: inode.0,
