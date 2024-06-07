@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use datatoaster_traits::BlockAccess;
 
-use crate::inode::{DirectoryInode, InodeHandle, InodeIndex};
+use crate::directory::DirectoryInode;
+use crate::inode::{InodeHandle, InodeIndex};
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {

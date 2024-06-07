@@ -7,18 +7,16 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use itertools::Itertools;
 use lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard};
 use spin::lock_api::{Mutex, RwLock};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::bitmap::BitmapAllocator;
-use crate::directory::{DirEntryBlock, DiskDirEntry, DIRENTRY_PER_BLOCK};
 use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
 // FIXME: implement indirect blocks
-const NB_DIRECT_BLOCKS: usize = 61;
+pub(crate) const NB_DIRECT_BLOCKS: usize = 61;
 pub const ROOT_INODE: NonZeroU64 = NonZeroU64::MIN;
 pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
 pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex = InodeIndex(ROOT_INODE);
@@ -53,6 +51,18 @@ unsafe impl bytemuck::PodInOption for InodeIndex {}
 
 #[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
 pub(crate) struct FileBlockIndex(usize);
+
+impl From<FileBlockIndex> for u64 {
+    fn from(value: FileBlockIndex) -> Self {
+        value.0.try_into().unwrap()
+    }
+}
+
+impl From<FileBlockIndex> for usize {
+    fn from(value: FileBlockIndex) -> Self {
+        value.0
+    }
+}
 
 #[derive(bytemuck::Zeroable, bytemuck::NoUninit, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u16)]
@@ -186,7 +196,7 @@ impl Inode {
         Ok(())
     }
 
-    fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
     ) -> impl Iterator<Item = Result<(FileBlockIndex, Option<[u8; BLOCK_SIZE]>), Error>> + '_ {
@@ -205,145 +215,6 @@ impl Inode {
             .iter()
             .position(|b| b.is_none())
             .map(FileBlockIndex)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct DirectoryInode<'inode>(&'inode Inode);
-
-impl<'inode> TryFrom<&'inode Inode> for DirectoryInode<'inode> {
-    type Error = Error;
-
-    fn try_from(value: &'inode Inode) -> Result<Self, Self::Error> {
-        if InodeType::try_from(value.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
-        }
-        Ok(DirectoryInode(value))
-    }
-}
-
-impl<'inode> DirectoryInode<'inode> {
-    fn block_iter<D: BlockAccess<BLOCK_SIZE>>(
-        self,
-        fs: &'inode FilesystemInner<D>,
-    ) -> Result<
-        impl Iterator<Item = Result<(FileBlockIndex, Option<DirEntryBlock>), Error>> + '_,
-        Error,
-    > {
-        Ok(self
-            .0
-            .data_block_iter(fs)
-            .map_ok(|(block_num, byte_block)| (block_num, byte_block.map(bytemuck::cast))))
-    }
-
-    fn alloc_block_iter<D: BlockAccess<BLOCK_SIZE>>(
-        self,
-        fs: &'inode FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<(FileBlockIndex, DirEntryBlock), Error>> + '_, Error>
-    {
-        Ok(
-            self.block_iter(fs)?
-                .filter_map_ok(|(block_num, block_data)| block_data.map(|bd| (block_num, bd))), // Take out the option
-        )
-    }
-
-    pub(crate) fn readdir_iter<D: BlockAccess<BLOCK_SIZE>>(
-        self,
-        fs: &'inode FilesystemInner<D>,
-        start: u64,
-    ) -> Result<impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + '_, Error> {
-        let skip_blocks = start / DIRENTRY_PER_BLOCK as u64;
-        let skip_entries = start % DIRENTRY_PER_BLOCK as u64;
-        let base_iter = self.block_iter(fs)?;
-
-        // Yes, this is deranged.
-        let iter = base_iter
-            .skip(skip_blocks as usize)
-            .filter_map_ok(|(block_num, block_data)| block_data.map(|bd| (block_num, bd))) // Take out the option
-            .map_ok(move |(block_num, block)| {
-                let skip = if block_num.0 as u64 == skip_blocks {
-                    skip_entries
-                } else {
-                    0
-                };
-                block
-                    .into_iter()
-                    .enumerate()
-                    .skip(skip as usize)
-                    .map(move |(offset, dent)| {
-                        (((block_num.0 * DIRENTRY_PER_BLOCK) + offset) as u64, dent)
-                    })
-                    .filter(|(_, dent)| !dent.is_empty())
-            })
-            .flatten_ok();
-
-        Ok(iter)
-    }
-
-    pub(crate) fn lookup<D: BlockAccess<BLOCK_SIZE>>(
-        self,
-        fs: &FilesystemInner<D>,
-        name: &[u8],
-    ) -> Result<(FileBlockIndex, usize, DiskDirEntry), Error> {
-        self.alloc_block_iter(fs)?
-            .filter_map_ok(move |(block_num, block)| {
-                block
-                    .with_name(name)
-                    .map(|(offset, dentry)| (block_num, offset, dentry))
-            })
-            .next()
-            .ok_or(Error::NotFound)?
-    }
-
-    pub(crate) fn free_slot<D: BlockAccess<BLOCK_SIZE>>(
-        self,
-        fs: &FilesystemInner<D>,
-    ) -> Result<(FileBlockIndex, usize, DirEntryBlock), Error> {
-        self.alloc_block_iter(fs)?
-            .filter_map_ok(|(block_num, mut block)| {
-                block
-                    .first_free_entry()
-                    .map(|(offset, _)| offset)
-                    .map(|offset| (block_num, offset, block))
-            })
-            .next()
-            .ok_or(Error::OutOfSpace)?
-    }
-
-    pub(crate) fn nb_slots_free(self) -> usize {
-        let nb_alloc_slots = self.0.nb_alloc_blocks() * DIRENTRY_PER_BLOCK;
-        nb_alloc_slots.checked_sub(self.0.size as usize).unwrap()
-    }
-
-    pub(crate) fn is_full(self) -> bool {
-        self.0.nb_alloc_blocks() == NB_DIRECT_BLOCKS && self.nb_slots_free() == 0
-    }
-
-    pub(crate) fn as_inner(self) -> &'inode Inode {
-        self.0
-    }
-}
-
-pub(crate) struct DirectoryInodeMut<'inode>(&'inode mut Inode);
-
-impl<'inode> TryFrom<&'inode mut Inode> for DirectoryInodeMut<'inode> {
-    type Error = Error;
-
-    fn try_from(value: &'inode mut Inode) -> Result<Self, Self::Error> {
-        if InodeType::try_from(value.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
-        }
-        Ok(DirectoryInodeMut(value))
-    }
-}
-
-impl<'inode> DirectoryInodeMut<'inode> {
-    pub(crate) fn as_ref(&self) -> DirectoryInode<'_> {
-        DirectoryInode(self.0)
-    }
-
-    pub(crate) fn as_inner(&mut self) -> &mut Inode {
-        self.0
     }
 }
 

@@ -8,7 +8,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use directory::{DirEntryBlock, DiskDirEntry, MAX_FILENAME_LENGTH};
 use filehandle::{OpenCounter, RawFileHandle};
 use lock_api::RwLockUpgradableReadGuard;
 use snafu::prelude::*;
@@ -22,10 +21,13 @@ mod filehandle;
 mod inode;
 mod superblock;
 
-use bitmap::{BitmapAllocator, BitmapBitIndex};
-use inode::{
-    DirectoryInode, DirectoryInodeMut, Inode, InodeAllocator, InodeHandle, InodeIndex,
-    RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
+use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
+use crate::directory::{
+    DirEntryBlock, DirectoryInode, DirectoryInodeMut, DiskDirEntry, MAX_FILENAME_LENGTH,
+};
+use crate::inode::{
+    Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock, INODES_PER_BLOCK,
+    ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 

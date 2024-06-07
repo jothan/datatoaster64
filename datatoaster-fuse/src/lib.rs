@@ -180,6 +180,25 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply.error(libc::ENOSYS)
     }
 
+    fn access(&mut self, _req: &fuser::Request<'_>, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
+        eprintln!("access ino:{ino} mask:{mask}");
+
+        reply.ok()
+    }
+
+    fn lseek(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        offset: i64,
+        _whence: i32,
+        reply: fuser::ReplyLseek,
+    ) {
+        eprintln!("lseek");
+        reply.offset(offset);
+    }
+
     fn lookup(
         &mut self,
         _req: &fuser::Request<'_>,
