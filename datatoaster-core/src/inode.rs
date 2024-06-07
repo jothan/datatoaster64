@@ -185,7 +185,7 @@ impl Inode {
     fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
-    ) -> impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + 'a {
+    ) -> impl Iterator<Item = Result<Option<[u8; BLOCK_SIZE]>, Error>> + '_ {
         self.direct_blocks.iter().cloned().map(|db| {
             let Some(index) = db else {
                 return Ok(None);
@@ -198,55 +198,53 @@ impl Inode {
                 .map_err(|e| Error::Block { e })
         })
     }
+}
 
-    pub(crate) fn directory_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
-        &'a self,
-        fs: &'a FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<Option<DirEntryBlock>, Error>> + 'a, Error> {
-        if InodeType::try_from(self.kind)? != InodeType::Directory {
+#[derive(Clone, Copy)]
+pub(crate) struct DirectoryInode<'inode>(&'inode Inode);
+
+impl<'inode> TryFrom<&'inode Inode> for DirectoryInode<'inode> {
+    type Error = Error;
+
+    fn try_from(value: &'inode Inode) -> Result<Self, Self::Error> {
+        if InodeType::try_from(value.kind)? != InodeType::Directory {
             return Err(Error::NotDirectory);
         }
+        Ok(DirectoryInode(value))
+    }
+}
 
+impl<'inode> DirectoryInode<'inode> {
+    fn block_iter<D: BlockAccess<BLOCK_SIZE>>(
+        self,
+        fs: &'inode FilesystemInner<D>,
+    ) -> Result<impl Iterator<Item = Result<Option<DirEntryBlock>, Error>> + '_, Error> {
         Ok(self
+            .0
             .data_block_iter(fs)
             .map_ok(|byte_block| byte_block.map(bytemuck::cast)))
     }
 
-    pub(crate) fn directory_alloc_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
-        &'a self,
-        fs: &'a FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<(usize, DirEntryBlock), Error>> + 'a, Error> {
+    fn alloc_block_iter<D: BlockAccess<BLOCK_SIZE>>(
+        self,
+        fs: &'inode FilesystemInner<D>,
+    ) -> Result<impl Iterator<Item = Result<(usize, DirEntryBlock), Error>> + '_, Error> {
         Ok(
-            self.directory_block_iter(fs)?
+            self.block_iter(fs)?
                 .enumerate()
                 .map(|(block_num, result)| result.map(|opt| opt.map(|block| (block_num, block))))
                 .filter_map_ok(|opt| opt), // Take out the option
         )
     }
 
-    pub(crate) fn directory_lookup<'a, D: BlockAccess<BLOCK_SIZE>>(
-        &'a self,
-        fs: &'a FilesystemInner<D>,
-        name: &[u8],
-    ) -> Result<(usize, usize, DiskDirEntry), Error> {
-        self.directory_alloc_block_iter(fs)?
-            .filter_map_ok(move |(block_num, block)| {
-                block
-                    .with_name(name)
-                    .map(|(offset, dentry)| (block_num, offset, dentry))
-            })
-            .next()
-            .ok_or(Error::NotFound)?
-    }
-
-    pub(crate) fn directory_readdir_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
-        &'a self,
-        fs: &'a FilesystemInner<D>,
+    pub(crate) fn readdir_iter<D: BlockAccess<BLOCK_SIZE>>(
+        self,
+        fs: &'inode FilesystemInner<D>,
         start: u64,
-    ) -> Result<impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + 'a, Error> {
+    ) -> Result<impl Iterator<Item = Result<(u64, DiskDirEntry), Error>> + '_, Error> {
         let skip_blocks = start / DIRENTRY_PER_BLOCK as u64;
         let skip_entries = start % DIRENTRY_PER_BLOCK as u64;
-        let base_iter = self.directory_block_iter(fs)?;
+        let base_iter = self.block_iter(fs)?;
 
         // Yes, this is deranged.
         let iter = base_iter
@@ -274,11 +272,26 @@ impl Inode {
         Ok(iter)
     }
 
-    pub(crate) fn directory_free_slot<'a, D: BlockAccess<BLOCK_SIZE>>(
-        &'a self,
-        fs: &'a FilesystemInner<D>,
+    pub(crate) fn lookup<D: BlockAccess<BLOCK_SIZE>>(
+        self,
+        fs: &FilesystemInner<D>,
+        name: &[u8],
+    ) -> Result<(usize, usize, DiskDirEntry), Error> {
+        self.alloc_block_iter(fs)?
+            .filter_map_ok(move |(block_num, block)| {
+                block
+                    .with_name(name)
+                    .map(|(offset, dentry)| (block_num, offset, dentry))
+            })
+            .next()
+            .ok_or(Error::NotFound)?
+    }
+
+    pub(crate) fn free_slot<D: BlockAccess<BLOCK_SIZE>>(
+        self,
+        fs: &FilesystemInner<D>,
     ) -> Result<(usize, usize, DirEntryBlock), Error> {
-        self.directory_alloc_block_iter(fs)?
+        self.alloc_block_iter(fs)?
             .filter_map_ok(|(block_num, mut block)| {
                 block
                     .first_free_entry()

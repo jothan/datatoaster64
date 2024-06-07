@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use datatoaster_traits::BlockAccess;
 
-use crate::inode::{InodeHandle, InodeIndex};
+use crate::inode::{DirectoryInode, InodeHandle, InodeIndex};
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
@@ -89,7 +89,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
         let guard = inode.read();
 
         // Summon the ancient one
-        let mut chutulu = guard.directory_readdir_iter(&self.0.fs, start)?;
+        let dir_inode = DirectoryInode::try_from(&*guard)?;
+        let mut chutulu = dir_inode.readdir_iter(&self.0.fs, start)?;
 
         while let Some((offset, direntry)) = chutulu.next().transpose()? {
             if f(offset, (&direntry).try_into()?) {

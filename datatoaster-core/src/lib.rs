@@ -23,8 +23,8 @@ mod superblock;
 
 use bitmap::{BitmapAllocator, BitmapBitIndex};
 use inode::{
-    Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock, INODES_PER_BLOCK,
-    ROOT_DIRECTORY_INODE,
+    DirectoryInode, Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock,
+    INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 
@@ -269,7 +269,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             return Err(Error::NotDirectory);
         }
 
-        let (_, _, dirent) = guard.directory_lookup(&self.0, name)?;
+        let dir_inode = DirectoryInode::try_from(&*guard)?;
+        let (_, _, dirent) = dir_inode.lookup(&self.0, name)?;
 
         drop(guard);
         drop(inode);
