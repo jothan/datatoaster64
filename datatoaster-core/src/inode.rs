@@ -323,7 +323,7 @@ impl InodeAllocator {
         let mut bytes: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
         device.read(block_index.into(), &mut bytes)?;
         let bytes = unsafe { bytes.assume_init_ref() };
-        Ok(*bytemuck::must_cast_ref(bytes))
+        Ok(bytemuck::pod_read_unaligned(bytes))
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(
