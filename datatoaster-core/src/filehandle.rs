@@ -16,17 +16,23 @@ pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
-    fn inode(&self) -> Option<&InodeHandle> {
+    pub(crate) fn inode(&self) -> Option<&InodeHandle> {
         self.inode.as_ref()
     }
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
-    pub(crate) fn new(fs: Arc<FilesystemInner<D>>, inode: InodeHandle) -> Self {
-        RawFileHandle {
+    pub(crate) fn open(
+        inode_index: InodeIndex,
+        fs: Arc<FilesystemInner<D>>,
+    ) -> Result<Self, Error> {
+        fs.open_counter.lock().increment(inode_index)?;
+        let inode = fs.inodes.get_handle(inode_index, &fs.device)?;
+
+        Ok(RawFileHandle {
             fs,
             inode: Some(inode),
-        }
+        })
     }
 
     fn close(&mut self) -> Result<(), Error> {
@@ -34,7 +40,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
             return Ok(());
         };
 
-        self.fs.raw_file_close(inode)
+        let mut open_counter = self.fs.open_counter.lock();
+        let still_open = open_counter.decrement(inode.0)?.is_some();
+
+        if !still_open {
+            let mut guard = inode.1.write();
+            if guard.nlink == 0 {
+                self.fs
+                    .inodes
+                    .free(&mut guard, inode.0, &self.fs.alloc, &self.fs.device)?;
+            }
+        }
+        Ok(())
     }
 
     fn is_closed(&self) -> bool {

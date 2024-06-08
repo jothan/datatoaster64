@@ -24,8 +24,7 @@ mod superblock;
 use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
 use crate::directory::{DirEntryBlock, DirectoryInode, DirectoryInodeMut, DiskDirEntry};
 use crate::inode::{
-    Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock, INODES_PER_BLOCK,
-    ROOT_DIRECTORY_INODE,
+    Inode, InodeAllocator, InodeIndex, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
 };
 use superblock::SuperBlock;
 
@@ -200,30 +199,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
         Ok(())
     }
 
-    pub(crate) fn raw_file_open(
-        self: Arc<Self>,
-        inode_index: InodeIndex,
-    ) -> Result<RawFileHandle<D>, Error> {
-        self.open_counter.lock().increment(inode_index)?;
-        let inode = self.inodes.get_handle(inode_index, &self.device)?;
-        Ok(RawFileHandle::new(self, inode))
-    }
-
-    pub(crate) fn raw_file_close(&self, inode: InodeHandle) -> Result<(), Error> {
-        let mut open_counter = self.open_counter.lock();
-        let still_open = open_counter.decrement(inode.0)?.is_some();
-
-        if !still_open {
-            let mut guard = inode.1.write();
-            if guard.nlink == 0 {
-                self.inodes
-                    .free(&mut guard, inode.0, &self.alloc, &self.device)?;
-            }
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn alloc_data(&self, inode_index: InodeIndex) -> Result<DataBlockIndex, Error> {
         let block = self.alloc.lock().alloc(&self.device)?;
         self.inodes.dirty_inode_block(inode_index);
@@ -254,8 +229,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
     pub fn opendir(&self, inode_index: u64) -> Result<DirectoryHandle<D>, Error> {
         let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
-        let raw = self.0.clone().raw_file_open(inode_index)?;
-        let inode = raw.inode.as_ref().unwrap();
+        let raw = RawFileHandle::open(inode_index, self.0.clone())?;
+
+        let inode = raw.inode().unwrap();
         let guard = inode.1.read();
 
         if InodeType::try_from(guard.kind)? != InodeType::Directory {
@@ -267,8 +243,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
     pub fn open(&self, inode_index: u64) -> Result<FileHandle<D>, Error> {
         let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
-        let raw = self.0.clone().raw_file_open(inode_index)?;
-        let inode = raw.inode.as_ref().unwrap();
+        let raw = RawFileHandle::open(inode_index, self.0.clone())?;
+
+        let inode = raw.inode().unwrap();
         let guard = inode.1.read();
 
         if InodeType::try_from(guard.kind)? != InodeType::File {
