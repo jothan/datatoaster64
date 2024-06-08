@@ -29,6 +29,7 @@ snafu = { version = "0.8.3", default-features = false, features = ["unstable-cor
 lock_api = { version = "0.4.12", default-features = false, features = ["arc_lock"] }
 itertools = { version = "0.13", default-features = false }
 heapless = { version = "0.8", default-features = false }
+log = "0.4.21"
 
 [lints]
 workspace = true

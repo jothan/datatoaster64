@@ -20,8 +20,9 @@ pub(crate) const NB_DIRECT_BLOCKS: usize = 61;
 pub const ROOT_INODE: NonZeroU64 = NonZeroU64::MIN;
 pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
 pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex = InodeIndex(ROOT_INODE);
+pub(crate) const MAX_FILE_SIZE: u64 = NB_DIRECT_BLOCKS as u64 * BLOCK_SIZE as u64;
 
-#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Debug)]
 struct InodeBlockIndex(u64);
 
 impl From<InodeBlockIndex> for BlockIndex {
@@ -49,8 +50,33 @@ impl From<InodeIndex> for u64 {
 unsafe impl bytemuck::ZeroableInOption for InodeIndex {}
 unsafe impl bytemuck::PodInOption for InodeIndex {}
 
-#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq)]
+#[derive(Clone, Copy, Ord, PartialOrd, PartialEq, Eq, Debug)]
 pub(crate) struct FileBlockIndex(usize);
+
+impl FileBlockIndex {
+    pub(crate) fn from_operation(
+        position: u64,
+        length: usize,
+    ) -> Result<(FileBlockIndex, usize), Error> {
+        if position > MAX_FILE_SIZE || position.saturating_add(length as u64) > MAX_FILE_SIZE {
+            return Err(Error::OutOfSpace);
+        }
+
+        let offset = position as usize % BLOCK_SIZE;
+        Ok((
+            FileBlockIndex((position / BLOCK_SIZE as u64) as usize),
+            offset,
+        ))
+    }
+
+    pub(crate) fn increment(&mut self) -> Result<(), Error> {
+        if self.0 > NB_DIRECT_BLOCKS - 1 {
+            return Err(Error::Invalid);
+        }
+        self.0 += 1;
+        Ok(())
+    }
+}
 
 impl From<FileBlockIndex> for u64 {
     fn from(value: FileBlockIndex) -> Self {
@@ -164,7 +190,7 @@ impl Inode {
 
     // Returns None if reading a hole
     // FIXME: returning a big value.
-    fn read_block<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn read_block<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         fs: &FilesystemInner<D>,
         block: FileBlockIndex,
@@ -366,18 +392,21 @@ impl InodeAllocator {
 
             *inode = init(index);
             assert!(inode.kind != InodeType::Free as _);
-            self.dirty_blocks.lock().insert(block_index);
+            log::debug!("alloc {index:?}");
+            self.dirty_inode_block(index);
             drop(inode);
 
             *self.alloc_cursor.lock() = block_index;
             return Ok(InodeHandle(index, inode_arc));
         }
 
+        log::error!("alloc failed");
         Err(Error::OutOfSpace)
     }
 
     pub(crate) fn dirty_inode_block(&self, inode_index: InodeIndex) {
         let block = self.inode_index_location(inode_index).0;
+        log::debug!("dirty inode {inode_index:?} {block:?}");
         self.dirty_blocks.lock().insert(block);
     }
 
@@ -388,8 +417,10 @@ impl InodeAllocator {
         block_alloc: &Mutex<BitmapAllocator>,
         device: &D,
     ) -> Result<(), Error> {
+        log::debug!("free {inode_index:?}");
         // FIXME: put a better condition here, make sure directories are empty.
         if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
+            log::error!("invalid free {inode_index:?}");
             return Err(Error::Invalid);
         }
 

@@ -10,6 +10,8 @@ use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;
 use slotmap::{new_key_type, Key, KeyData, SlotMap};
 
+pub use fuser;
+
 macro_rules! key64 {
     ($t:ident) => {
         new_key_type! { struct $t; }
@@ -274,15 +276,23 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         &mut self,
         _req: &fuser::Request<'_>,
         _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _data: &[u8],
+        fh: u64,
+        offset: i64,
+        data: &[u8],
         _write_flags: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        reply.error(libc::ENOSYS);
+        let Some(handle) = self.open_files.get_mut(fh.into()) else {
+            reply.error(libc::EBADF);
+            return;
+        };
+
+        match handle.pwrite(offset, data) {
+            Ok(_) => reply.written(data.len() as u32),
+            Err(e) => reply.error(e.into()),
+        }
     }
 }
 

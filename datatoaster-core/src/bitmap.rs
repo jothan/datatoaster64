@@ -166,6 +166,7 @@ impl BitmapAllocator {
                     continue;
                 };
 
+                log::debug!("alloc {data_block:?}");
                 return Ok(data_block);
             }
         }
@@ -176,9 +177,10 @@ impl BitmapAllocator {
     pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
         device: &D,
-        data_index: DataBlockIndex,
+        data_block: DataBlockIndex,
     ) -> Result<(), Error> {
-        let bit_index = data_index.into_bitmap_bit_index(&self.layout);
+        log::debug!("free {data_block:?}");
+        let bit_index = data_block.into_bitmap_bit_index(&self.layout);
         let block_index = bit_index.block(&self.layout);
 
         let block = self.blocks.get(block_index, device)?;
@@ -188,6 +190,7 @@ impl BitmapAllocator {
 
         if *segment & mask == 0 {
             // Double free
+            log::error!("invalid free {data_block:?}");
             return Err(Error::Invalid);
         }
 

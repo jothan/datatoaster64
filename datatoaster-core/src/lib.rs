@@ -355,6 +355,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         }
 
         guard.size = guard.size.checked_add(1).unwrap();
+        self.0.inodes.dirty_inode_block(parent_inode);
 
         drop(guard);
 

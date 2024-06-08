@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use clap::Parser;
 use datatoaster_core::{Filesystem, BLOCK_SIZE};
-use datatoaster_fuse::FuseFilesystem;
+use datatoaster_fuse::{fuser::MountOption, FuseFilesystem};
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 #[derive(Debug, clap::Parser)]
@@ -127,7 +127,7 @@ fn mount_device(path: Box<Path>, mountpoint: Box<Path>) -> anyhow::Result<()> {
     let fs = FuseFilesystem::new(device)?;
 
     log::info!("File system started at {mountpoint:?}, waiting for Ctrl-C");
-    fs.run(mountpoint, &[])?;
+    fs.run(mountpoint, &[MountOption::FSName("datatoaster64".into())])?;
 
     log::info!("File system done");
 
