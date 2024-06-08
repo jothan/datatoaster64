@@ -81,6 +81,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         match self.inner.opendir(ino) {
             Ok(handle) => {
                 let fh = self.open_dirs.insert(handle).into();
+                log::debug!("OPENDIR fh {fh}");
                 reply.opened(fh, 0)
             }
             Err(e) => reply.error(e.into()),
@@ -211,6 +212,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         match self.inner.open(ino) {
             Ok(handle) => {
                 let fh = self.open_files.insert(handle).into();
+                log::debug!("OPEN fh {fh}");
                 reply.opened(fh, 0)
             }
             Err(e) => reply.error(e.into()),
@@ -237,7 +239,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
             Ok((handle, stat)) => {
                 let attr = Stat::from(stat).into();
                 let fh = self.open_files.insert(handle).into();
-                log::debug!("CREATE ok fh:{fh}");
+                log::debug!("CREATE fh {fh}");
                 reply.created(&Duration::new(0, 0), &attr, 0, fh, 0)
             }
             Err(e) => {
