@@ -65,19 +65,19 @@ impl<D: BlockAccess<BLOCK_SIZE> + Send + Sync + 'static> FuseFilesystem<D> {
 
 impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
     fn destroy(&mut self) {
-        eprintln!("Syncing");
-        self.inner.sync().expect("sync error");
+        log::info!("Syncing");
+        if let Err(e) = self.inner.sync() {
+            log::error!("Sync error: {e:}");
+        }
     }
 
     fn opendir(
         &mut self,
         _req: &fuser::Request<'_>,
         ino: u64,
-        flags: i32,
+        _flags: i32,
         reply: fuser::ReplyOpen,
     ) {
-        eprintln!("opendir ino:{ino} flags:{flags}");
-
         match self.inner.opendir(ino) {
             Ok(handle) => {
                 let fh = self.open_dirs.insert(handle).into();
@@ -90,37 +90,34 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
     fn release(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        eprintln!("release ino:{ino} fh:{fh}");
+        let Some(mut handle) = self.open_files.remove(fh.into()) else {
+            reply.error(libc::EBADF);
+            return;
+        };
 
-        if self
-            .open_files
-            .remove(fh.into())
-            .and_then(|mut h| h.close().ok())
-            .is_some()
-        {
-            reply.ok()
-        } else {
-            reply.error(libc::EBADF)
+        let res = handle.close().and_then(|_| self.inner.sync());
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.into()),
         }
     }
 
     fn releasedir(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
-        flags: i32,
+        _flags: i32,
         reply: fuser::ReplyEmpty,
     ) {
-        eprintln!("releasedir ino:{ino} fh:{fh} flags:{flags}");
-
         if self
             .open_dirs
             .remove(fh.into())
@@ -136,23 +133,17 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
     fn readdir(
         &mut self,
         _req: &fuser::Request<'_>,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         offset: i64,
         mut reply: fuser::ReplyDirectory,
     ) {
-        eprintln!("readdir ino:{ino} fh:{fh} offset:{offset}");
-
         let Some(handle) = self.open_dirs.get(fh.into()) else {
             reply.error(libc::EBADF);
             return;
         };
 
         let res = handle.readdir(offset.try_into().unwrap(), |offset, dirent| {
-            eprintln!(
-                "add #{offset} {dirent:?} {:?}",
-                String::from_utf8_lossy(dirent.name())
-            );
             let offset = i64::try_from(offset).unwrap() + 1;
             reply.add(
                 dirent.inode(),
@@ -168,35 +159,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         }
     }
 
-    fn readdirplus(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        reply: fuser::ReplyDirectoryPlus,
-    ) {
-        eprintln!("readdirplus ino:{ino} fh:{fh} offset:{offset}");
-        reply.error(libc::ENOSYS)
-    }
-
-    fn access(&mut self, _req: &fuser::Request<'_>, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
-        eprintln!("access ino:{ino} mask:{mask}");
-
-        reply.ok()
-    }
-
-    fn lseek(
+    fn access(
         &mut self,
         _req: &fuser::Request<'_>,
         _ino: u64,
-        _fh: u64,
-        offset: i64,
-        _whence: i32,
-        reply: fuser::ReplyLseek,
+        _mask: i32,
+        reply: fuser::ReplyEmpty,
     ) {
-        eprintln!("lseek");
-        reply.offset(offset);
+        reply.ok()
     }
 
     fn lookup(
@@ -206,8 +176,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        eprintln!("lookup parent:{parent} name:{name:?}");
-
         match self.inner.lookup(parent, name.as_bytes()) {
             Ok(stat) => reply.entry(&Duration::new(0, 0), &Stat::from(stat).into(), 0),
             Err(e) => reply.error(e.into()),
@@ -233,9 +201,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyAttr,
     ) {
         // FIXME
-        eprintln!("setattr");
         match self.inner.stat(ino) {
             Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),
+            Err(e) => reply.error(e.into()),
+        }
+    }
+
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        match self.inner.open(ino) {
+            Ok(handle) => {
+                let fh = self.open_files.insert(handle).into();
+                reply.opened(fh, 0)
+            }
             Err(e) => reply.error(e.into()),
         }
     }
@@ -246,33 +223,64 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         parent: u64,
         name: &OsStr,
         mode: u32,
-        umask: u32,
-        flags: i32,
+        _umask: u32,
+        _flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        eprintln!("create:{parent} name:{name:?} mode:{mode} umask:{umask} flags:{flags}");
+        let res = self.inner.create(parent, name.as_bytes(), mode);
+        let res = res.and_then(|r| {
+            self.inner.sync()?;
+            Ok(r)
+        });
 
-        match self.inner.create(parent, name.as_bytes(), mode) {
+        match res {
             Ok((handle, stat)) => {
                 let attr = Stat::from(stat).into();
                 let fh = self.open_files.insert(handle).into();
-                eprintln!("create ok fh:{fh}");
+                log::debug!("CREATE ok fh:{fh}");
                 reply.created(&Duration::new(0, 0), &attr, 0, fh, 0)
             }
             Err(e) => {
-                eprintln!("create error: {e:?}");
+                log::error!("CREATE error: {e:?}");
                 reply.error(e.into())
             }
         }
     }
 
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
-        eprintln!("getattr ino:{ino}");
-
         match self.inner.stat(ino) {
             Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),
             Err(e) => reply.error(e.into()),
         }
+    }
+
+    fn read(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _offset: i64,
+        _size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyData,
+    ) {
+        reply.error(libc::ENOSYS)
+    }
+
+    fn write(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _offset: i64,
+        _data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: fuser::ReplyWrite,
+    ) {
+        reply.error(libc::ENOSYS);
     }
 }
 

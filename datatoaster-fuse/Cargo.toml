@@ -12,6 +12,7 @@ libc = { version = "0.2", features = ["const-extern-fn", "extra_traits"] }
 signal-hook = "0.3"
 anyhow = "1.0"
 slotmap = "1.0"
+log = "0.4"
 
 [lints]
 workspace = true

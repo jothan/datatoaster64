@@ -121,15 +121,15 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
 }
 
 fn mount_device(path: Box<Path>, mountpoint: Box<Path>) -> anyhow::Result<()> {
-    eprintln!("Opening {path:?}");
+    log::info!("Opening {path:?}");
     let device = FileDevice::open_for_mount(path)?;
-    eprintln!("Opening file system");
+    log::info!("Opening file system");
     let fs = FuseFilesystem::new(device)?;
 
-    eprintln!("File system started at {mountpoint:?}, waiting for Ctrl-C");
+    log::info!("File system started at {mountpoint:?}, waiting for Ctrl-C");
     fs.run(mountpoint, &[])?;
 
-    eprintln!("File system done");
+    log::info!("File system done");
 
     Ok(())
 }
@@ -141,6 +141,7 @@ fn format_device(path: Box<Path>, size_in_mb: NonZeroU64) -> anyhow::Result<()> 
 }
 
 fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
     match args.command {

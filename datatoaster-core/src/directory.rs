@@ -11,7 +11,7 @@ use crate::{
     BlockAccess, Error, FilesystemInner, BLOCK_SIZE,
 };
 
-pub(crate) const MAX_FILENAME_LENGTH: usize = 54;
+pub const MAX_FILENAME_LENGTH: usize = 54;
 pub(crate) const DIRENTRY_SIZE: usize = std::mem::size_of::<DiskDirEntry>();
 pub(crate) const DIRENTRY_PER_BLOCK: usize = BLOCK_SIZE / DIRENTRY_SIZE;
 
@@ -269,6 +269,7 @@ impl<'inode> DirectoryInode<'inode> {
         self.0.nb_alloc_blocks() == NB_DIRECT_BLOCKS && self.nb_slots_free() == 0
     }
 
+    #[allow(dead_code)]
     pub(crate) fn as_inner(self) -> &'inode Inode {
         self.0
     }

@@ -22,9 +22,7 @@ mod inode;
 mod superblock;
 
 use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
-use crate::directory::{
-    DirEntryBlock, DirectoryInode, DirectoryInodeMut, DiskDirEntry, MAX_FILENAME_LENGTH,
-};
+use crate::directory::{DirEntryBlock, DirectoryInode, DirectoryInodeMut, DiskDirEntry};
 use crate::inode::{
     Inode, InodeAllocator, InodeHandle, InodeIndex, RawInodeBlock, INODES_PER_BLOCK,
     ROOT_DIRECTORY_INODE,
@@ -32,7 +30,7 @@ use crate::inode::{
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
-pub use directory::DirEntry;
+pub use directory::{DirEntry, MAX_FILENAME_LENGTH};
 pub use filehandle::{DirectoryHandle, FileHandle};
 pub use inode::{InodeType, Stat, ROOT_INODE};
 
@@ -326,11 +324,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
         let mut dir_inode = DirectoryInodeMut::try_from(&mut *guard)?;
 
-        let new_inode = self.0.inodes.alloc(&self.0.device, |_| {
-            Inode::new_file(mode as u16 /* lossy !*/)
-        })?;
+        let new_inode_value = Inode::new_file(mode as u16 /* lossy !*/);
+        let new_inode = self.0.inodes.alloc(&self.0.device, |_| new_inode_value)?;
         let new_dirent = DiskDirEntry::new_file(new_inode.0, name)?;
-        let stat = Stat::try_from((new_inode.0, dir_inode.as_ref().as_inner()))?;
+        let stat = Stat::try_from((new_inode.0, &new_inode_value))?;
 
         if dir_inode.as_ref().nb_slots_free() == 0 {
             // Allocate a fresh directory block
