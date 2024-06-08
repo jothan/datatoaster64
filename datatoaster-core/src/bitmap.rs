@@ -6,6 +6,7 @@ use std::num::NonZeroU64;
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
+use crate::buffers::BufferBox;
 use crate::{DataBlockIndex, DeviceLayout, Error, BLOCK_SIZE};
 
 const BITMAP_SEGMENTS: usize = BLOCK_SIZE / std::mem::size_of::<u64>();
@@ -30,7 +31,7 @@ impl BitmapBlocks {
         match self.blocks.entry(index) {
             Entry::Vacant(e) => {
                 let block = BitmapAllocator::read_block(index, device)?;
-                Ok(e.insert(block))
+                Ok(e.insert(*block))
             }
             Entry::Occupied(e) => Ok(e.into_mut()),
         }
@@ -102,11 +103,15 @@ impl BitmapAllocator {
     fn read_block<D: BlockAccess<BLOCK_SIZE>>(
         block_index: BitmapBlockIndex,
         device: &D,
-    ) -> Result<BitmapBlock, Error> {
-        let mut bytes = MaybeUninit::uninit();
-        device.read(block_index.into(), &mut bytes)?;
-        let bytes = unsafe { bytes.assume_init_ref() };
-        Ok(bytemuck::pod_read_unaligned(bytes))
+    ) -> Result<BufferBox<BitmapBlock>, Error> {
+        let mut block = BufferBox::<BitmapBlock>::new_uninit();
+        {
+            let block_ptr: *mut MaybeUninit<BitmapBlock> = &mut *block;
+            let block: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { &mut *block_ptr.cast() };
+            device.read(block_index.into(), block)?;
+        }
+        let bytes = unsafe { block.assume_init() };
+        Ok(bytes)
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(

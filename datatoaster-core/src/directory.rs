@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 use bytemuck::Zeroable;
 use itertools::Itertools;
 
+use crate::buffers::BufferBox;
 use crate::inode::{Inode, InodeIndex, InodeType};
 use crate::{
     inode::{FileBlockIndex, NB_DIRECT_BLOCKS},
@@ -174,20 +175,28 @@ impl<'inode> DirectoryInode<'inode> {
         self,
         fs: &'inode FilesystemInner<D>,
     ) -> Result<
-        impl Iterator<Item = Result<(FileBlockIndex, Option<DirEntryBlock>), Error>> + '_,
+        impl Iterator<Item = Result<(FileBlockIndex, Option<BufferBox<DirEntryBlock>>), Error>> + '_,
         Error,
     > {
         Ok(self
             .0
             .data_block_iter(fs)
-            .map_ok(|(block_num, byte_block)| (block_num, byte_block.map(bytemuck::must_cast))))
+            .map_ok(|(block_num, byte_block)| {
+                (
+                    block_num,
+                    // The alignments don't match up, this reallocation is a bit clumsy.
+                    byte_block.map(|bb| BufferBox::new(bytemuck::pod_read_unaligned(&*bb))),
+                )
+            }))
     }
 
     fn alloc_block_iter<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &'inode FilesystemInner<D>,
-    ) -> Result<impl Iterator<Item = Result<(FileBlockIndex, DirEntryBlock), Error>> + '_, Error>
-    {
+    ) -> Result<
+        impl Iterator<Item = Result<(FileBlockIndex, BufferBox<DirEntryBlock>), Error>> + '_,
+        Error,
+    > {
         Ok(
             self.block_iter(fs)?
                 .filter_map_ok(|(block_num, block_data)| block_data.map(|bd| (block_num, bd))), // Take out the option
@@ -248,7 +257,7 @@ impl<'inode> DirectoryInode<'inode> {
     pub(crate) fn free_slot<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &FilesystemInner<D>,
-    ) -> Result<(FileBlockIndex, usize, DirEntryBlock), Error> {
+    ) -> Result<(FileBlockIndex, usize, BufferBox<DirEntryBlock>), Error> {
         self.alloc_block_iter(fs)?
             .filter_map_ok(|(block_num, mut block)| {
                 block

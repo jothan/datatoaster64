@@ -90,7 +90,6 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
         buffer: &mut std::mem::MaybeUninit<[u8; BLOCK_SIZE]>,
     ) -> Result<(), BlockError> {
         let position = Self::block_position(block_idx);
-
         let buffer = buffer.write([0; BLOCK_SIZE]);
 
         let read = pread(&self.file, buffer, position).map_err(|_| BlockError::IO)?;

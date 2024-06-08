@@ -1,4 +1,5 @@
 #![no_std]
+#![feature(new_uninit, maybe_uninit_as_bytes, maybe_uninit_uninit_array_transpose)]
 extern crate no_std_compat as std;
 
 use std::prelude::v1::*;
@@ -16,6 +17,7 @@ use spin::lock_api::Mutex;
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 mod bitmap;
+mod buffers;
 mod directory;
 mod filehandle;
 mod inode;
@@ -327,7 +329,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
                 inode.0,
                 &self.0,
                 block_num,
-                bytemuck::must_cast_ref(&block_data),
+                bytemuck::must_cast_ref(&*block_data),
             )?;
         }
 
@@ -344,11 +346,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
 
-        const ZERO_BLOCK: [u8; BLOCK_SIZE] = [0; BLOCK_SIZE];
-
         // Wipe all metadata
         for block_idx in 0..layout.bitmap_blocks.end.0 {
-            device.write(BlockIndex(block_idx), &ZERO_BLOCK)?;
+            device.write(BlockIndex(block_idx), &[0; BLOCK_SIZE])?;
         }
 
         let mut alloc = BitmapAllocator::new(&layout);

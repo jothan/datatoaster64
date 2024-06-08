@@ -13,6 +13,7 @@ use spin::lock_api::{Mutex, RwLock};
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::bitmap::BitmapAllocator;
+use crate::buffers::{BlockBuffer, BufferBox};
 use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
 // FIXME: implement indirect blocks
@@ -191,11 +192,11 @@ impl Inode {
         &self,
         fs: &FilesystemInner<D>,
         block: FileBlockIndex,
-    ) -> Result<Option<[u8; BLOCK_SIZE]>, Error> {
+    ) -> Result<Option<BlockBuffer>, Error> {
         let Some(data_block) = self.direct_blocks[block.0] else {
             return Ok(None);
         };
-        let mut buffer: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+        let mut buffer = BlockBuffer::new_uninit();
         fs.device.read(data_block.into(), &mut buffer)?;
         Ok(Some(unsafe { buffer.assume_init() }))
     }
@@ -222,7 +223,7 @@ impl Inode {
     pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
-    ) -> impl Iterator<Item = Result<(FileBlockIndex, Option<[u8; BLOCK_SIZE]>), Error>> + '_ {
+    ) -> impl Iterator<Item = Result<(FileBlockIndex, Option<BlockBuffer>), Error>> + '_ {
         (0..NB_DIRECT_BLOCKS).map(|block_num| {
             let block_num = FileBlockIndex(block_num);
             self.read_block(fs, block_num).map(|r| (block_num, r))
@@ -264,9 +265,11 @@ impl InodeBlock {
     }
 }
 
-impl From<RawInodeBlock> for InodeBlock {
-    fn from(value: RawInodeBlock) -> Self {
-        InodeBlock(std::array::from_fn(|i| Arc::new(RwLock::new(value.0[i]))))
+impl From<&RawInodeBlock> for BufferBox<InodeBlock> {
+    fn from(value: &RawInodeBlock) -> Self {
+        BufferBox::new(InodeBlock(std::array::from_fn(|i| {
+            Arc::new(RwLock::new(value.0[i]))
+        })))
     }
 }
 
@@ -309,8 +312,9 @@ impl InodeAllocator {
     ) -> Result<T, Error> {
         match self.blocks.lock().entry(block_index) {
             Entry::Vacant(e) => {
-                let block = Self::read_block(block_index, device)?.into();
-                Ok(f(e.insert(block)))
+                let raw_block = Self::read_block(block_index, device)?;
+                let block = BufferBox::<InodeBlock>::from(&*raw_block);
+                Ok(f(e.insert(*block)))
             }
             Entry::Occupied(e) => Ok(f(e.get())),
         }
@@ -319,11 +323,15 @@ impl InodeAllocator {
     fn read_block<D: BlockAccess<BLOCK_SIZE>>(
         block_index: InodeBlockIndex,
         device: &D,
-    ) -> Result<RawInodeBlock, Error> {
-        let mut bytes: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
-        device.read(block_index.into(), &mut bytes)?;
-        let bytes = unsafe { bytes.assume_init_ref() };
-        Ok(bytemuck::pod_read_unaligned(bytes))
+    ) -> Result<BufferBox<RawInodeBlock>, Error> {
+        let mut block = BufferBox::<RawInodeBlock>::new_uninit();
+        {
+            let block_ptr: *mut MaybeUninit<RawInodeBlock> = &mut *block;
+            let block: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { &mut *block_ptr.cast() };
+            device.read(block_index.into(), block)?;
+        }
+        let bytes = unsafe { block.assume_init() };
+        Ok(bytes)
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(

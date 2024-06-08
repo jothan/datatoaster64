@@ -170,10 +170,11 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
             let op_data;
             (op_data, data_remaining) = data_remaining.split_at_mut(op_len);
 
-            let buffer = guard
-                .read_block(&self.0.fs, data_block)?
-                .unwrap_or([0u8; BLOCK_SIZE]);
-            op_data.copy_from_slice(&buffer[offset..offset + op_data.len()]);
+            if let Some(buffer) = guard.read_block(&self.0.fs, data_block)? {
+                op_data.copy_from_slice(&buffer[offset..offset + op_data.len()]);
+            } else {
+                op_data.fill(0);
+            }
 
             if !data_remaining.is_empty() {
                 offset = 0;
@@ -220,7 +221,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
                         op_data.len()
                     );
 
-                    [0u8; BLOCK_SIZE]
+                    bytemuck::zeroed_box()
                 };
 
                 buffer[offset..offset + op_data.len()].copy_from_slice(op_data);
