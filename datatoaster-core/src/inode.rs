@@ -54,11 +54,8 @@ unsafe impl bytemuck::PodInOption for InodeIndex {}
 pub(crate) struct FileBlockIndex(usize);
 
 impl FileBlockIndex {
-    pub(crate) fn from_operation(
-        position: u64,
-        length: usize,
-    ) -> Result<(FileBlockIndex, usize), Error> {
-        if position > MAX_FILE_SIZE || position.saturating_add(length as u64) > MAX_FILE_SIZE {
+    pub(crate) fn from_file_position(position: u64) -> Result<(FileBlockIndex, usize), Error> {
+        if position > MAX_FILE_SIZE {
             return Err(Error::OutOfSpace);
         }
 

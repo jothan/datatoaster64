@@ -290,7 +290,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         };
 
         match handle.pwrite(offset, data) {
-            Ok(_) => reply.written(data.len() as u32),
+            Ok(written) => reply.written(written as u32),
             Err(e) => reply.error(e.into()),
         }
     }

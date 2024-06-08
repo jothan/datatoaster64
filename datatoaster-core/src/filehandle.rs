@@ -7,7 +7,7 @@ use std::sync::Arc;
 use datatoaster_traits::BlockAccess;
 
 use crate::directory::DirectoryInode;
-use crate::inode::{FileBlockIndex, InodeHandle, InodeIndex};
+use crate::inode::{FileBlockIndex, InodeHandle, InodeIndex, MAX_FILE_SIZE};
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
@@ -121,22 +121,40 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
 pub struct FileHandle<D: BlockAccess<BLOCK_SIZE>>(pub(crate) RawFileHandle<D>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
-    pub fn pwrite(&mut self, position: i64, mut data: &[u8]) -> Result<(), Error> {
-        // TODO: truncate large writes and return the number of bytes written.
+    /// Truncate the operation past the end of the file.
+    /// Returns None if the start position is invalid.
+    fn trim_op(position: u64, data: &[u8]) -> Option<&[u8]> {
+        if position > MAX_FILE_SIZE {
+            return None;
+        }
+
+        let position_end = std::cmp::min(
+            position
+                .checked_add(data.len().try_into().unwrap())
+                .unwrap(),
+            MAX_FILE_SIZE,
+        );
+        let data_length: usize = (position_end - position).try_into().unwrap();
+        Some(&data[..data_length])
+    }
+
+    pub fn pwrite(&mut self, position: i64, data: &[u8]) -> Result<usize, Error> {
         let Some(InodeHandle(inode_index, inode)) = self.0.inode() else {
             return Err(Error::Invalid);
         };
-        let position = u64::try_from(position).map_err(|_| Error::Invalid)?;
 
-        let data_length = data.len();
-        let (mut data_block, mut offset) = FileBlockIndex::from_operation(position, data.len())?;
+        let position = position.try_into().unwrap();
+        let data = Self::trim_op(position, data).ok_or(Error::OutOfSpace)?;
+
+        let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
 
         let mut guard = inode.write();
+        let mut data_remaining = data;
 
-        while !data.is_empty() {
-            let op_len = std::cmp::min(BLOCK_SIZE - offset, data.len());
+        while !data_remaining.is_empty() {
+            let op_len = std::cmp::min(BLOCK_SIZE - offset, data_remaining.len());
             let op_data;
-            (op_data, data) = data.split_at(op_len);
+            (op_data, data_remaining) = data_remaining.split_at(op_len);
 
             if let Ok(op_data) = op_data.try_into() {
                 log::debug!("{inode_index:?} full write to {data_block:?}");
@@ -162,17 +180,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
                 guard.write_block(*inode_index, &self.0.fs, data_block, &buffer)?;
             }
 
-            if !data.is_empty() {
+            if !data_remaining.is_empty() {
                 offset = 0;
                 data_block.increment()?;
             }
         }
 
-        guard.size = std::cmp::max(guard.size, position + data_length as u64);
+        guard.size = std::cmp::max(guard.size, position + data.len() as u64);
         self.0.fs.inodes.dirty_inode_block(*inode_index);
 
-        Ok(())
+        Ok(data.len())
     }
+
     pub fn close(&mut self) -> Result<(), Error> {
         if self.0.is_closed() {
             return Err(Error::Invalid);
