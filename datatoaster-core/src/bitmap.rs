@@ -103,13 +103,10 @@ impl BitmapAllocator {
         block_index: BitmapBlockIndex,
         device: &D,
     ) -> Result<BitmapBlock, Error> {
-        let mut block: MaybeUninit<[u64; BITMAP_SEGMENTS]> = MaybeUninit::uninit();
-        let bytes: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { std::mem::transmute(&mut block) };
-        device.read(block_index.into(), bytes)?;
-
-        let block = BitmapBlock(unsafe { block.assume_init() });
-
-        Ok(block)
+        let mut bytes: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+        device.read(block_index.into(), &mut bytes)?;
+        let bytes = unsafe { bytes.assume_init_ref() };
+        Ok(*bytemuck::must_cast_ref(bytes))
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(

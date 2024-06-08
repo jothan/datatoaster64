@@ -340,7 +340,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
                 inode.0,
                 &self.0,
                 new_block,
-                bytemuck::cast_ref(&block_data),
+                bytemuck::must_cast_ref(&block_data),
             )?;
         } else {
             // Insert into an existing block
@@ -350,7 +350,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
                 inode.0,
                 &self.0,
                 block_num,
-                bytemuck::cast_ref(&block_data),
+                bytemuck::must_cast_ref(&block_data),
             )?;
         }
 
@@ -382,7 +382,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let root_dir_contents =
             DirEntryBlock::new_first_block(ROOT_DIRECTORY_INODE, ROOT_DIRECTORY_INODE);
-        device.write(root_dir_data.into(), bytemuck::cast_ref(&root_dir_contents))?;
+        device.write(
+            root_dir_data.into(),
+            bytemuck::must_cast_ref(&root_dir_contents),
+        )?;
 
         // Create the root directory inode
         let mut root_inode = Inode::zeroed();
@@ -396,7 +399,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         root_inode_block.0[0] = root_inode;
         device.write(
             layout.inode_blocks.start,
-            bytemuck::cast_ref(&root_inode_block),
+            bytemuck::must_cast_ref(&root_inode_block),
         )?;
 
         // Create the superblock

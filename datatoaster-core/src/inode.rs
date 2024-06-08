@@ -241,7 +241,9 @@ impl Inode {
     }
 }
 
-#[derive(bytemuck::Zeroable, bytemuck::NoUninit, bytemuck::TransparentWrapper, Clone, Copy)]
+#[derive(
+    bytemuck::NoUninit, bytemuck::TransparentWrapper, bytemuck::AnyBitPattern, Clone, Copy,
+)]
 #[repr(transparent)]
 pub(crate) struct RawInodeBlock(pub(crate) [Inode; INODES_PER_BLOCK]);
 
@@ -318,13 +320,10 @@ impl InodeAllocator {
         block_index: InodeBlockIndex,
         device: &D,
     ) -> Result<RawInodeBlock, Error> {
-        let mut block: MaybeUninit<RawInodeBlock> = MaybeUninit::uninit();
-        let bytes: &mut MaybeUninit<[u8; BLOCK_SIZE]> = unsafe { std::mem::transmute(&mut block) };
-        device.read(block_index.into(), bytes)?;
-
-        let block = unsafe { block.assume_init() };
-
-        Ok(block)
+        let mut bytes: MaybeUninit<[u8; BLOCK_SIZE]> = MaybeUninit::uninit();
+        device.read(block_index.into(), &mut bytes)?;
+        let bytes = unsafe { bytes.assume_init_ref() };
+        Ok(*bytemuck::must_cast_ref(bytes))
     }
 
     fn write_block<D: BlockAccess<BLOCK_SIZE>>(

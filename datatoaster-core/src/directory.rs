@@ -180,7 +180,7 @@ impl<'inode> DirectoryInode<'inode> {
         Ok(self
             .0
             .data_block_iter(fs)
-            .map_ok(|(block_num, byte_block)| (block_num, byte_block.map(bytemuck::cast))))
+            .map_ok(|(block_num, byte_block)| (block_num, byte_block.map(bytemuck::must_cast))))
     }
 
     fn alloc_block_iter<D: BlockAccess<BLOCK_SIZE>>(
