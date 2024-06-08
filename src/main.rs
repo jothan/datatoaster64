@@ -1,15 +1,13 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
 use std::path::Path;
-use std::sync::Mutex;
 
 use clap::Parser;
 use datatoaster_core::{Filesystem, BLOCK_SIZE};
 use datatoaster_fuse::{fuser::MountOption, FuseFilesystem};
 use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
+use nix::sys::uio::{pread, pwrite};
 
 #[derive(Debug, clap::Parser)]
 #[command(name = "datatoaster64")]
@@ -33,7 +31,7 @@ enum Command {
 }
 
 struct FileDevice {
-    file: Mutex<File>,
+    file: File,
     block_length: BlockIndex,
 }
 
@@ -54,10 +52,7 @@ impl FileDevice {
 
         let block_length = Self::file_length(&file)?;
 
-        Ok(FileDevice {
-            file: Mutex::new(file),
-            block_length,
-        })
+        Ok(FileDevice { file, block_length })
     }
 
     fn open_for_format<P: AsRef<Path>>(
@@ -75,16 +70,16 @@ impl FileDevice {
         file.set_len(byte_length)?;
 
         Ok(FileDevice {
-            file: Mutex::new(file),
+            file,
             block_length: BlockIndex(byte_length / BLOCK_SIZE as u64),
         })
     }
 
-    fn seek(file: &mut File, position: BlockIndex) -> Result<(), BlockError> {
-        file.seek(SeekFrom::Start(position.0 * BLOCK_SIZE as u64))
-            .map_err(|_| BlockError::IO)?;
-
-        Ok(())
+    fn block_position(block: BlockIndex) -> i64 {
+        i64::try_from(block.0)
+            .unwrap()
+            .checked_mul(BLOCK_SIZE as i64)
+            .unwrap()
     }
 }
 
@@ -94,24 +89,24 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
         block_idx: BlockIndex,
         buffer: &mut std::mem::MaybeUninit<[u8; BLOCK_SIZE]>,
     ) -> Result<(), BlockError> {
-        let mut file = self.file.lock().unwrap();
-        Self::seek(&mut file, block_idx)?;
+        let position = Self::block_position(block_idx);
 
-        *buffer = MaybeUninit::zeroed();
-        let buffer = unsafe { buffer.assume_init_mut() };
+        let buffer = buffer.write([0; BLOCK_SIZE]);
 
-        file.read_exact(buffer.as_mut_slice())
-            .map_err(|_| BlockError::IO)?;
-
+        let read = pread(&self.file, buffer, position).map_err(|_| BlockError::IO)?;
+        if read != BLOCK_SIZE {
+            return Err(BlockError::Invalid);
+        }
         Ok(())
     }
 
     fn write(&self, block_idx: BlockIndex, buffer: &[u8; BLOCK_SIZE]) -> Result<(), BlockError> {
-        let mut file = self.file.lock().unwrap();
-        Self::seek(&mut file, block_idx)?;
-        file.write_all(buffer.as_slice())
-            .map_err(|_| BlockError::IO)?;
+        let position = Self::block_position(block_idx);
 
+        let written = pwrite(&self.file, buffer, position).map_err(|_| BlockError::IO)?;
+        if written != BLOCK_SIZE {
+            return Err(BlockError::Invalid);
+        }
         Ok(())
     }
 
