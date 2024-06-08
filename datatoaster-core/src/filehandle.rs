@@ -44,7 +44,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
 
 impl<D: BlockAccess<BLOCK_SIZE>> Drop for RawFileHandle<D> {
     fn drop(&mut self) {
-        self.close().expect("close error on inode");
+        if let Err(e) = self.close() {
+            log::error!("Error closing raw file handle in drop: {e}")
+        }
     }
 }
 
