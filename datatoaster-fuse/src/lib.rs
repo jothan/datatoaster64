@@ -1,3 +1,5 @@
+#![feature(new_uninit)]
+
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -262,14 +264,24 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         &mut self,
         _req: &fuser::Request<'_>,
         _ino: u64,
-        _fh: u64,
-        _offset: i64,
-        _size: u32,
+        fh: u64,
+        offset: i64,
+        size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        reply.error(libc::ENOSYS)
+        let Some(handle) = self.open_files.get(fh.into()) else {
+            reply.error(libc::EBADF);
+            return;
+        };
+
+        let mut buffer = unsafe { Box::new_zeroed_slice(size as usize).assume_init() };
+
+        match handle.pread(offset, &mut buffer) {
+            Ok(read) => reply.data(&buffer[..read]),
+            Err(e) => reply.error(e.into()),
+        }
     }
 
     fn write(
@@ -284,7 +296,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        let Some(handle) = self.open_files.get_mut(fh.into()) else {
+        let Some(handle) = self.open_files.get(fh.into()) else {
             reply.error(libc::EBADF);
             return;
         };

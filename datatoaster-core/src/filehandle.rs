@@ -123,28 +123,58 @@ pub struct FileHandle<D: BlockAccess<BLOCK_SIZE>>(pub(crate) RawFileHandle<D>);
 impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
     /// Truncate the operation past the end of the file.
     /// Returns None if the start position is invalid.
-    fn trim_op(position: u64, data: &[u8]) -> Option<&[u8]> {
+    fn trim_op(position: u64, length: usize) -> Option<usize> {
         if position > MAX_FILE_SIZE {
             return None;
         }
 
         let position_end = std::cmp::min(
-            position
-                .checked_add(data.len().try_into().unwrap())
-                .unwrap(),
+            position.checked_add(length.try_into().unwrap()).unwrap(),
             MAX_FILE_SIZE,
         );
-        let data_length: usize = (position_end - position).try_into().unwrap();
-        Some(&data[..data_length])
+        Some((position_end - position).try_into().unwrap())
     }
 
-    pub fn pwrite(&mut self, position: i64, data: &[u8]) -> Result<usize, Error> {
+    pub fn pread(&self, position: i64, data: &mut [u8]) -> Result<usize, Error> {
+        let Some(InodeHandle(_, inode)) = self.0.inode() else {
+            return Err(Error::Invalid);
+        };
+        let position = position.try_into().unwrap();
+        let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
+        let data = &mut data[..data_length];
+
+        let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
+
+        let guard = inode.read();
+        let mut data_remaining = data;
+
+        while !data_remaining.is_empty() {
+            let op_len = std::cmp::min(BLOCK_SIZE - offset, data_remaining.len());
+            let op_data;
+            (op_data, data_remaining) = data_remaining.split_at_mut(op_len);
+
+            let buffer = guard
+                .read_block(&self.0.fs, data_block)?
+                .unwrap_or([0u8; BLOCK_SIZE]);
+            op_data.copy_from_slice(&buffer[offset..offset + op_data.len()]);
+
+            if !data_remaining.is_empty() {
+                offset = 0;
+                data_block.increment()?;
+            }
+        }
+
+        Ok(data_length)
+    }
+
+    pub fn pwrite(&self, position: i64, data: &[u8]) -> Result<usize, Error> {
         let Some(InodeHandle(inode_index, inode)) = self.0.inode() else {
             return Err(Error::Invalid);
         };
 
         let position = position.try_into().unwrap();
-        let data = Self::trim_op(position, data).ok_or(Error::OutOfSpace)?;
+        let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
+        let data = &data[..data_length];
 
         let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
 
