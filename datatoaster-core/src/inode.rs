@@ -586,7 +586,7 @@ impl InodeAllocator {
         fs: Arc<FilesystemInner<D>>,
         value: &Inode,
     ) -> Result<InodeHandle, Error> {
-        if value.kind == InodeType::Free as _ {
+        if value.is_kind(InodeType::Free)? {
             return Err(Error::Invalid);
         }
 
@@ -600,7 +600,7 @@ impl InodeAllocator {
 
             let scan_result = block.0.iter().enumerate().find_map(|(o, arc)| {
                 arc.try_upgradable_read()
-                    .filter(|g| g.kind == InodeType::Free as _)
+                    .filter(|g| g.is_kind(InodeType::Free) == Ok(true))
                     .map(|g| (o, arc, g))
             });
 
@@ -637,7 +637,7 @@ impl InodeAllocator {
     ) -> Result<(), Error> {
         log::debug!("free {:?}", inode.index());
         // FIXME: put a better condition here, make sure directories are empty.
-        if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
+        if inode.is_kind(InodeType::Free)? || inode.nlink != 0 {
             log::error!("invalid free {:?}", inode.index());
             return Err(Error::Invalid);
         }
