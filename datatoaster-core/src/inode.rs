@@ -650,6 +650,19 @@ impl InodeAllocator {
             return Err(Error::Invalid);
         }
 
+        self.free_data_blocks(inode, block_alloc, device)?;
+
+        *inode.deref_mut() = Inode::zeroed();
+
+        Ok(())
+    }
+
+    pub(crate) fn free_data_blocks<D: BlockAccess<BLOCK_SIZE>>(
+        &self,
+        inode: &mut InodeHandleWrite<D>,
+        block_alloc: &Mutex<BitmapAllocator>,
+        device: &D,
+    ) -> Result<(), Error> {
         let mut block_alloc = block_alloc.lock();
         inode.direct_blocks.iter_mut().try_for_each(|b| {
             if let Some(data_block) = *b {
@@ -659,12 +672,7 @@ impl InodeAllocator {
             } else {
                 Ok(())
             }
-        })?;
-        drop(block_alloc);
-
-        *inode.deref_mut() = Inode::zeroed();
-
-        Ok(())
+        })
     }
 
     fn inode_index_from_location(&self, block: InodeBlockIndex, offset: usize) -> InodeIndex {

@@ -58,6 +58,10 @@ pub enum Error {
     AlreadyExists,
     #[snafu(display("A directory was found when expecting a file"))]
     IsDirectory,
+    #[snafu(display("Something other that a directory was found"))]
+    IsNotDirectory,
+    #[snafu(display("Directory not empty"))]
+    NotEmpty,
     #[snafu(display("Block device error {e}"))]
     Block { e: BlockError },
 }
@@ -79,6 +83,8 @@ impl From<Error> for std::ffi::c_int {
             Error::NotFound => libc::ENOENT,
             Error::AlreadyExists => libc::EEXIST,
             Error::IsDirectory => libc::EISDIR,
+            Error::IsNotDirectory => libc::ENOTDIR,
+            Error::NotEmpty => libc::ENOTEMPTY,
             _ => libc::ENOSYS,
         }
     }
@@ -303,6 +309,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let mut guard = guard.upgrade(self.0.clone());
         let mut dir_inode = guard.as_dir_mut()?;
+        if dir_inode.nlink == 0 {
+            return Err(Error::NotFound);
+        }
 
         dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
@@ -328,12 +337,15 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let child_dirent = DiskDirEntry::new_directory(child_inode.index(), name)?;
 
         let mut parent_guard = guard.upgrade(self.0.clone());
-        let mut parent_dir_inode = parent_guard.as_dir_mut()?;
+        let mut parent_dir = parent_guard.as_dir_mut()?;
 
         let mut child_guard = child_inode.write(self.0.clone());
+        if child_guard.nlink == 0 {
+            return Err(Error::NotFound);
+        }
 
-        parent_dir_inode.insert_dirent(&self.0, &child_dirent)?;
-        parent_dir_inode.size = parent_dir_inode.size.checked_add(1).unwrap();
+        parent_dir.insert_dirent(&self.0, &child_dirent)?;
+        parent_dir.size = parent_dir.size.checked_add(1).unwrap();
         child_guard.nlink += 1;
 
         let block = DirEntryBlock::new_first_block(child_guard.index(), parent_guard.index());
@@ -348,6 +360,77 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         parent_guard.nlink = parent_guard.nlink.checked_add(1).unwrap();
 
         Stat::new(child_guard.index(), &child_guard)
+    }
+
+    pub fn rmdir(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let parent_guard = inode.upgradable_read();
+
+        let parent_dir = parent_guard.as_dir()?;
+
+        let (block_num, offset, mut block) = parent_dir.lookup(&self.0, name)?;
+        let dirent = &block.0[offset];
+        if dirent.kind() != Some(InodeType::Directory) {
+            return Err(Error::IsNotDirectory);
+        }
+
+        let child_index = self
+            .0
+            .inodes
+            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
+        let child_inode = self.0.inodes.get_handle(child_index, &self.0.device)?;
+        let mut parent_guard = parent_guard.upgrade(self.0.clone());
+        let mut parent_dir = parent_guard.as_dir_mut()?;
+
+        let open_counter = self.0.open_counter.lock();
+        let still_open = open_counter.is_open(child_inode.index());
+        let mut child_guard = child_inode.write(self.0.clone());
+        drop(open_counter);
+
+        if child_guard.nlink == 0 {
+            return Err(Error::NotFound);
+        }
+
+        if child_guard.size > 2 || child_guard.nlink > 2 {
+            return Err(Error::NotEmpty);
+        }
+
+        if child_guard.size != 2 || child_guard.nlink != 2 {
+            log::error!(
+                "directory {:?} size and links are not conistent ({}, {})",
+                child_guard.index(),
+                child_guard.size,
+                child_guard.nlink
+            );
+            return Err(Error::Invalid);
+        }
+
+        // Zap "." and ".."
+        self.0
+            .inodes
+            .free_data_blocks(&mut child_guard, &self.0.alloc, &self.0.device)?;
+        child_guard.size = 0;
+        child_guard.nlink = 1;
+        parent_dir.nlink -= 1;
+
+        // Remove the directory entry in the parent
+        block.0[offset] = DiskDirEntry::zeroed();
+        parent_dir.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
+        parent_dir.size -= 1;
+        child_guard.nlink = 0;
+
+        if !still_open {
+            self.0
+                .inodes
+                .free(&mut child_guard, &self.0.alloc, &self.0.device)?;
+        }
+
+        Ok(())
     }
 
     pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {

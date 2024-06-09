@@ -275,11 +275,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         _umask: u32,
         reply: fuser::ReplyEntry,
     ) {
-        let res = self.inner.mkdir(parent, name.as_bytes(), mode);
-        let res = res.and_then(|r| {
-            self.inner.sync()?;
-            Ok(r)
-        });
+        let res = self
+            .inner
+            .mkdir(parent, name.as_bytes(), mode)
+            .and_then(|r| {
+                self.inner.sync()?;
+                Ok(r)
+            });
 
         match res {
             Ok(stat) => {
@@ -290,6 +292,24 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
                 log::error!("MKDIR error: {e:?}");
                 reply.error(e.into())
             }
+        }
+    }
+
+    fn rmdir(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let res = self.inner.rmdir(parent, name.as_bytes()).and_then(|r| {
+            self.inner.sync()?;
+            Ok(r)
+        });
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.into()),
         }
     }
 
