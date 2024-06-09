@@ -71,24 +71,6 @@ pub(crate) trait InodeHolderMut: InodeHolder + DerefMut {
     fn as_dir_mut(&mut self) -> Result<DirectoryInodeMut<'_>, Error> {
         DirectoryInodeMut::new(self)
     }
-
-    fn write_block<D: BlockAccess<BLOCK_SIZE>>(
-        &mut self,
-        fs: &FilesystemInner<D>,
-        block: FileBlockIndex,
-        buffer: &[u8; BLOCK_SIZE],
-    ) -> Result<(), Error> {
-        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
-            data_block
-        } else {
-            let data_block = fs.alloc_data(self.index())?;
-            self.direct_blocks[block.0] = Some(data_block);
-            data_block
-        };
-
-        fs.device.write(data_block.into(), buffer)?;
-        Ok(())
-    }
 }
 
 impl<T: InodeHolder + DerefMut> InodeHolderMut for T {}
@@ -105,9 +87,9 @@ impl InodeReference for InodeHandleUpgradableRead<'_> {
     }
 }
 
-impl InodeReference for InodeHandleWrite<'_> {
+impl<D> InodeReference for InodeHandleWrite<'_, D> {
     fn index(&self) -> InodeIndex {
-        self.0
+        self.index
     }
 }
 
@@ -221,7 +203,7 @@ impl Stat {
     }
 }
 
-#[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug)]
+#[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct Inode {
     // For files: the size in bytes
@@ -252,8 +234,6 @@ impl Inode {
         Ok(())
     }
 
-    // Returns None if reading a hole
-    // FIXME: returning a big value.
     pub(crate) fn read_block<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         fs: &FilesystemInner<D>,
@@ -265,6 +245,24 @@ impl Inode {
         let mut buffer = BlockBuffer::new_uninit();
         fs.device.read(data_block.into(), &mut buffer)?;
         Ok(Some(unsafe { buffer.assume_init() }))
+    }
+
+    pub(crate) fn write_block<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        fs: &FilesystemInner<D>,
+        block: FileBlockIndex,
+        buffer: &[u8; BLOCK_SIZE],
+    ) -> Result<(), Error> {
+        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
+            data_block
+        } else {
+            let data_block = fs.alloc.lock().alloc(&fs.device)?;
+            self.direct_blocks[block.0] = Some(data_block);
+            data_block
+        };
+
+        fs.device.write(data_block.into(), buffer)?;
+        Ok(())
     }
 
     pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
@@ -306,7 +304,12 @@ impl From<&InodeBlockSnapshot> for RawInodeBlock {
 pub(crate) struct InodeHandle(pub(crate) InodeIndex, pub(crate) Arc<RwLock<Inode>>);
 pub(crate) struct InodeHandleRead<'a>(InodeIndex, RwLockReadGuard<'a, Inode>);
 pub(crate) struct InodeHandleUpgradableRead<'a>(InodeIndex, RwLockUpgradableReadGuard<'a, Inode>);
-pub(crate) struct InodeHandleWrite<'a>(InodeIndex, RwLockWriteGuard<'a, Inode>);
+pub(crate) struct InodeHandleWrite<'a, D> {
+    index: InodeIndex,
+    guard: Option<RwLockWriteGuard<'a, Inode>>,
+    snapshot: Option<BufferBox<Inode>>,
+    fs: Arc<FilesystemInner<D>>,
+}
 
 impl<'a> Deref for InodeHandleRead<'a> {
     type Target = Inode;
@@ -317,9 +320,9 @@ impl<'a> Deref for InodeHandleRead<'a> {
 }
 
 impl<'a> InodeHandleUpgradableRead<'a> {
-    pub(crate) fn upgrade(self) -> InodeHandleWrite<'a> {
+    pub(crate) fn upgrade<D>(self, fs: Arc<FilesystemInner<D>>) -> InodeHandleWrite<'a, D> {
         let guard = RwLockUpgradableReadGuard::upgrade(self.1);
-        InodeHandleWrite(self.0, guard)
+        InodeHandleWrite::new(self.0, guard, fs)
     }
 }
 
@@ -331,25 +334,69 @@ impl<'a> Deref for InodeHandleUpgradableRead<'a> {
     }
 }
 
-impl<'a> InodeHandleWrite<'a> {
+impl<'a, D> InodeHandleWrite<'a, D> {
+    fn new(
+        index: InodeIndex,
+        guard: RwLockWriteGuard<'a, Inode>,
+        fs: Arc<FilesystemInner<D>>,
+    ) -> Self {
+        InodeHandleWrite {
+            index,
+            guard: Some(guard),
+            fs,
+            snapshot: None,
+        }
+    }
+
+    fn flush_dirty(&mut self, current_value: &Inode) {
+        if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snap| current_value != snap.deref())
+        {
+            self.fs.inodes.dirty_inode_block(self.index());
+            self.snapshot = None;
+        } else {
+            log::debug!("{:?} is clean", self.index);
+        }
+    }
+
     #[allow(dead_code)]
-    pub(crate) fn downgrade(self) -> InodeHandleRead<'a> {
-        let guard = RwLockWriteGuard::downgrade(self.1);
-        InodeHandleRead(self.0, guard)
+    pub(crate) fn downgrade(mut self) -> InodeHandleRead<'a> {
+        let guard = self.guard.take().expect("inode write handle gone");
+        self.flush_dirty(guard.deref());
+        let guard = RwLockWriteGuard::downgrade(guard);
+        InodeHandleRead(self.index, guard)
     }
 }
 
-impl<'a> Deref for InodeHandleWrite<'a> {
+impl<'a, D> Deref for InodeHandleWrite<'a, D> {
     type Target = Inode;
 
     fn deref(&self) -> &Self::Target {
-        &self.1
+        self.guard
+            .as_ref()
+            .expect("inode write handle gone in deref")
     }
 }
 
-impl<'a> DerefMut for InodeHandleWrite<'a> {
+impl<'a, D> DerefMut for InodeHandleWrite<'a, D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.1
+        let guard = self
+            .guard
+            .as_mut()
+            .expect("inode write handle gone in deref_mut");
+        self.snapshot.get_or_insert_with(|| BufferBox::new(**guard));
+
+        guard
+    }
+}
+
+impl<'a, D> Drop for InodeHandleWrite<'a, D> {
+    fn drop(&mut self) {
+        if let Some(guard) = self.guard.take() {
+            self.flush_dirty(guard.deref());
+        }
     }
 }
 
@@ -362,8 +409,8 @@ impl InodeHandle {
         InodeHandleUpgradableRead(self.0, self.1.upgradable_read())
     }
 
-    pub(crate) fn write(&self) -> InodeHandleWrite<'_> {
-        InodeHandleWrite(self.0, self.1.write())
+    pub(crate) fn write<D>(&self, fs: Arc<FilesystemInner<D>>) -> InodeHandleWrite<'_, D> {
+        InodeHandleWrite::new(self.0, self.1.write(), fs)
     }
 }
 
@@ -497,7 +544,7 @@ impl InodeAllocator {
 
     pub(crate) fn alloc<D: BlockAccess<BLOCK_SIZE>>(
         &self,
-        device: &D,
+        fs: Arc<FilesystemInner<D>>,
         value: &Inode,
     ) -> Result<InodeHandle, Error> {
         if value.kind == InodeType::Free as _ {
@@ -510,34 +557,27 @@ impl InodeAllocator {
         for block_index in &mut iter {
             let block_index = InodeBlockIndex(block_index);
             let mut blocks = self.blocks.lock();
-            let block = blocks.get(block_index, device)?;
+            let block = blocks.get(block_index, &fs.device)?;
 
-            let scan_result = block
-                .0
-                .iter()
-                .enumerate()
-                .filter_map(|(o, arc)| {
-                    arc.try_upgradable_read()
-                        .filter(|g| g.kind == InodeType::Free as _)
-                        .map(|g| (o, arc, g))
-                })
-                .next();
+            let scan_result = block.0.iter().enumerate().find_map(|(o, arc)| {
+                arc.try_upgradable_read()
+                    .filter(|g| g.kind == InodeType::Free as _)
+                    .map(|g| (o, arc, g))
+            });
 
             let Some((offset, arc, guard)) = scan_result else {
                 continue;
             };
             let index = self.inode_index_from_location(block_index, offset);
 
-            let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
-            let handle = InodeHandle(index, arc.clone());
+            let mut guard =
+                InodeHandleWrite::new(index, RwLockUpgradableReadGuard::upgrade(guard), fs);
 
             *guard = *value;
-
             log::debug!("alloc {index:?}");
-            self.dirty_inode_block(index);
 
             *self.alloc_cursor.lock() = block_index;
-            return Ok(handle);
+            return Ok(InodeHandle(index, arc.clone()));
         }
 
         log::error!("alloc failed");
@@ -552,15 +592,14 @@ impl InodeAllocator {
 
     pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &self,
-        inode: &mut InodeHandleWrite,
+        inode: &mut InodeHandleWrite<D>,
         block_alloc: &Mutex<BitmapAllocator>,
         device: &D,
     ) -> Result<(), Error> {
-        let inode_index = inode.index();
-        log::debug!("free {inode_index:?}");
+        log::debug!("free {:?}", inode.index());
         // FIXME: put a better condition here, make sure directories are empty.
         if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
-            log::error!("invalid free {inode_index:?}");
+            log::error!("invalid free {:?}", inode.index());
             return Err(Error::Invalid);
         }
 
@@ -577,8 +616,6 @@ impl InodeAllocator {
         drop(block_alloc);
 
         *inode.deref_mut() = Inode::zeroed();
-
-        self.dirty_inode_block(inode.index());
 
         Ok(())
     }

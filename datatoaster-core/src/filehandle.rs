@@ -8,8 +8,7 @@ use datatoaster_traits::BlockAccess;
 
 use crate::directory::DirectoryInode;
 use crate::inode::{
-    FileBlockIndex, InodeHandle, InodeHolder, InodeHolderMut, InodeIndex, InodeReference,
-    MAX_FILE_SIZE,
+    FileBlockIndex, InodeHandle, InodeHolder, InodeIndex, InodeReference, MAX_FILE_SIZE,
 };
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
@@ -44,10 +43,11 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
         };
 
         let mut open_counter = self.fs.open_counter.lock();
-        let still_open = open_counter.decrement(inode.0)?.is_some();
+        let open_count = open_counter.decrement(inode.0)?;
 
-        let mut guard = inode.write();
-        if guard.nlink == 0 && !still_open {
+        let guard = inode.upgradable_read();
+        if guard.nlink == 0 && open_count.is_none() {
+            let mut guard = guard.upgrade(self.fs.clone());
             self.fs
                 .inodes
                 .free(&mut guard, &self.fs.alloc, &self.fs.device)?;
@@ -55,8 +55,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
             log::info!("{:?} unlink on close", inode.index())
         } else if guard.nlink == 0 {
             log::warn!(
-                "{:?} is dangling (0 links and still open), unlinking on close",
-                inode.index()
+                "{:?} is dangling (0 links and still open {} times), unlinking on close",
+                inode.index(),
+                open_count.unwrap()
             )
         }
         Ok(())
@@ -201,14 +202,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
         let Some(inode) = self.0.inode() else {
             return Err(Error::Invalid);
         };
-        let inode_index = inode.index();
         let position = position.try_into().unwrap();
         let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
         let data = &data[..data_length];
 
         let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
 
-        let mut guard = inode.write();
+        let mut guard = inode.write(self.0.fs.clone());
         let mut data_remaining = data;
 
         while !data_remaining.is_empty() {
@@ -217,19 +217,21 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
             (op_data, data_remaining) = data_remaining.split_at(op_len);
 
             if let Ok(op_data) = op_data.try_into() {
-                log::debug!("{inode_index:?} full write to {data_block:?}");
+                log::debug!("{:?} full write to {data_block:?}", inode.index());
                 guard.write_block(&self.0.fs, data_block, op_data)?;
             } else {
                 let mut buffer = if let Some(buffer) = guard.read_block(&self.0.fs, data_block)? {
                     log::debug!(
-                        "{inode_index:?} RMW write to {data_block:?} offset {offset} length {}",
+                        "{:?} RMW write to {data_block:?} offset {offset} length {}",
+                        inode.index(),
                         op_data.len()
                     );
 
                     buffer
                 } else {
                     log::debug!(
-                        "{inode_index:?} partial zero write to {data_block:?} offset {offset} length {}",
+                        "{:?} partial zero write to {data_block:?} offset {offset} length {}",
+                        inode.index(),
                         op_data.len()
                     );
 
@@ -247,7 +249,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
         }
 
         guard.size = std::cmp::max(guard.size, position + data.len() as u64);
-        self.0.fs.inodes.dirty_inode_block(inode.index());
 
         Ok(data.len())
     }

@@ -25,9 +25,7 @@ mod superblock;
 
 use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
 use crate::directory::{DirEntryBlock, DiskDirEntry};
-use crate::inode::{
-    Inode, InodeAllocator, InodeIndex, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
-};
+use crate::inode::{Inode, InodeAllocator, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE};
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -200,12 +198,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
 
         Ok(())
     }
-
-    pub(crate) fn alloc_data(&self, inode_index: InodeIndex) -> Result<DataBlockIndex, Error> {
-        let block = self.alloc.lock().alloc(&self.device)?;
-        self.inodes.dirty_inode_block(inode_index);
-        Ok(block)
-    }
 }
 
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
@@ -300,16 +292,15 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         };
 
         let new_inode_value = Inode::new_file(mode as u16 /* lossy !*/);
-        let new_inode = self.0.inodes.alloc(&self.0.device, &new_inode_value)?;
+        let new_inode = self.0.inodes.alloc(self.0.clone(), &new_inode_value)?;
         let new_dirent = DiskDirEntry::new_file(new_inode.index(), name)?;
         let stat = Stat::new(new_inode.index(), &new_inode_value)?;
 
-        let mut guard = guard.upgrade();
+        let mut guard = guard.upgrade(self.0.clone());
         let mut dir_inode = guard.as_dir_mut()?;
 
         dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
-        self.0.inodes.dirty_inode_block(parent_inode);
 
         let fh = self.open(new_inode.index().into())?;
         Ok((fh, stat))
@@ -337,12 +328,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             .inodes
             .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
         let child_inode = self.0.inodes.get_handle(child_index, &self.0.device)?;
-        let mut guard = guard.upgrade();
+        let mut guard = guard.upgrade(self.0.clone());
         let mut dir_inode = guard.as_dir_mut()?;
 
         let open_counter = self.0.open_counter.lock();
         let still_open = open_counter.is_open(child_inode.index());
-        let mut child_guard = child_inode.write();
+        let mut child_guard = child_inode.write(self.0.clone());
         drop(open_counter);
 
         if child_guard.nlink == 0 {
@@ -370,16 +361,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
                 "{:?} was unlinked and will be freed on close",
                 dir_inode.index()
             );
-            self.0.inodes.dirty_inode_block(child_guard.index());
         } else {
             log::info!(
                 "{:?} unlink, still {} reference counts",
                 dir_inode.index(),
                 child_guard.nlink
             );
-            self.0.inodes.dirty_inode_block(child_guard.index());
         }
-        self.0.inodes.dirty_inode_block(dir_inode.index());
 
         Ok(())
     }
