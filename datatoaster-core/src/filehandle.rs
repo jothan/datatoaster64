@@ -16,8 +16,8 @@ pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
-    pub(crate) fn inode(&self) -> Option<&InodeHandle> {
-        self.inode.as_ref()
+    pub(crate) fn inode(&self) -> Option<InodeHandle> {
+        self.inode.clone()
     }
 }
 

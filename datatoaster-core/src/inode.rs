@@ -348,6 +348,7 @@ impl From<&InodeBlockSnapshot> for RawInodeBlock {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct InodeHandle(pub(crate) InodeIndex, pub(crate) Arc<RwLock<Inode>>);
 pub(crate) struct InodeHandleRead<'a>(InodeIndex, RwLockReadGuard<'a, Inode>);
 pub(crate) struct InodeHandleUpgradableRead<'a>(InodeIndex, RwLockUpgradableReadGuard<'a, Inode>);
