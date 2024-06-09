@@ -71,6 +71,24 @@ pub(crate) trait InodeHolderMut: InodeHolder + DerefMut {
     fn as_dir_mut(&mut self) -> Result<DirectoryInodeMut<'_>, Error> {
         DirectoryInodeMut::new(self)
     }
+
+    fn write_block<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        fs: &FilesystemInner<D>,
+        block: FileBlockIndex,
+        buffer: &[u8; BLOCK_SIZE],
+    ) -> Result<(), Error> {
+        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
+            data_block
+        } else {
+            let data_block = fs.alloc_data(self.index())?;
+            self.direct_blocks[block.0] = Some(data_block);
+            data_block
+        };
+
+        fs.device.write(data_block.into(), buffer)?;
+        Ok(())
+    }
 }
 
 impl<T: InodeHolder + DerefMut> InodeHolderMut for T {}
@@ -247,25 +265,6 @@ impl Inode {
         let mut buffer = BlockBuffer::new_uninit();
         fs.device.read(data_block.into(), &mut buffer)?;
         Ok(Some(unsafe { buffer.assume_init() }))
-    }
-
-    pub(crate) fn write_block<D: BlockAccess<BLOCK_SIZE>>(
-        &mut self,
-        inode_index: InodeIndex,
-        fs: &FilesystemInner<D>,
-        block: FileBlockIndex,
-        buffer: &[u8; BLOCK_SIZE],
-    ) -> Result<(), Error> {
-        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
-            data_block
-        } else {
-            let data_block = fs.alloc_data(inode_index)?;
-            self.direct_blocks[block.0] = Some(data_block);
-            data_block
-        };
-
-        fs.device.write(data_block.into(), buffer)?;
-        Ok(())
     }
 
     pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
@@ -553,11 +552,11 @@ impl InodeAllocator {
 
     pub(crate) fn free<D: BlockAccess<BLOCK_SIZE>>(
         &self,
-        inode: &mut Inode,
-        inode_index: InodeIndex,
+        inode: &mut InodeHandleWrite,
         block_alloc: &Mutex<BitmapAllocator>,
         device: &D,
     ) -> Result<(), Error> {
+        let inode_index = inode.index();
         log::debug!("free {inode_index:?}");
         // FIXME: put a better condition here, make sure directories are empty.
         if inode.kind == InodeType::Free as _ || inode.nlink != 0 {
@@ -577,9 +576,9 @@ impl InodeAllocator {
         })?;
         drop(block_alloc);
 
-        *inode = Inode::zeroed();
+        *inode.deref_mut() = Inode::zeroed();
 
-        self.dirty_inode_block(inode_index);
+        self.dirty_inode_block(inode.index());
 
         Ok(())
     }
@@ -605,12 +604,12 @@ impl InodeAllocator {
 
     // Called mostly by user code, so don't panic.
     pub(crate) fn inode_index_from_u64(&self, index: u64) -> Result<InodeIndex, Error> {
-        let out = InodeIndex(NonZeroU64::new(index).ok_or(Error::Invalid)?);
+        let out = InodeIndex(NonZeroU64::new(index).ok_or(Error::NotFound)?);
         let block =
             InodeBlockIndex((out.ordinal() / INODES_PER_BLOCK as u64) + self.block_range.start.0);
 
         if !self.block_range.contains(&block) {
-            return Err(Error::Invalid);
+            return Err(Error::NotFound);
         }
         Ok(out)
     }

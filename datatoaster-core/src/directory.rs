@@ -63,6 +63,10 @@ impl DiskDirEntry {
         &self.name[..zero]
     }
 
+    pub(crate) fn kind(&self) -> Option<InodeType> {
+        InodeType::try_from(self.kind).ok()
+    }
+
     pub(crate) fn inode(&self) -> Option<NonZeroU64> {
         self.inode.map(Into::into)
     }
@@ -109,7 +113,9 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
     }
 }
 
-#[derive(bytemuck::Zeroable, bytemuck::Pod, bytemuck::TransparentWrapper, Clone, Copy)]
+#[derive(
+    bytemuck::AnyBitPattern, bytemuck::TransparentWrapper, bytemuck::NoUninit, Clone, Copy,
+)]
 #[repr(transparent)]
 pub(crate) struct DirEntryBlock(pub(crate) [DiskDirEntry; DIRENTRY_PER_BLOCK]);
 
@@ -244,12 +250,12 @@ impl<'inode> DirectoryInode<'inode> {
         self,
         fs: &FilesystemInner<D>,
         name: &[u8],
-    ) -> Result<(FileBlockIndex, usize, DiskDirEntry), Error> {
+    ) -> Result<(FileBlockIndex, usize, BufferBox<DirEntryBlock>), Error> {
         self.alloc_block_iter(fs)?
             .filter_map_ok(move |(block_num, block)| {
                 block
                     .with_name(name)
-                    .map(|(offset, dentry)| (block_num, offset, dentry))
+                    .map(|(offset, _)| (block_num, offset, block))
             })
             .next()
             .ok_or(Error::NotFound)?
@@ -325,7 +331,6 @@ impl<'inode> DirectoryInodeMut<'inode> {
 
     pub(crate) fn insert_dirent<D: BlockAccess<BLOCK_SIZE>>(
         &mut self,
-        dir_inode: InodeIndex,
         fs: &FilesystemInner<D>,
         new_dirent: &DiskDirEntry,
     ) -> Result<(), Error> {
@@ -336,22 +341,12 @@ impl<'inode> DirectoryInodeMut<'inode> {
             let mut block_data = DirEntryBlock::zeroed();
             block_data.0[0] = *new_dirent;
 
-            self.write_block(
-                dir_inode,
-                fs,
-                new_block,
-                bytemuck::must_cast_ref(&block_data),
-            )?;
+            self.write_block(fs, new_block, bytemuck::must_cast_ref(&block_data))?;
         } else {
             // Insert into an existing block
             let (block_num, offset, mut block_data) = self.as_ref().free_slot(fs)?;
             block_data.0[offset] = *new_dirent;
-            self.write_block(
-                dir_inode,
-                fs,
-                block_num,
-                bytemuck::must_cast_ref(&*block_data),
-            )?;
+            self.write_block(fs, block_num, bytemuck::must_cast_ref(&*block_data))?;
         }
 
         Ok(())

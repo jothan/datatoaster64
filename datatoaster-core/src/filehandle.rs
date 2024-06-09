@@ -8,7 +8,8 @@ use datatoaster_traits::BlockAccess;
 
 use crate::directory::DirectoryInode;
 use crate::inode::{
-    FileBlockIndex, InodeHandle, InodeHolder, InodeIndex, InodeReference, MAX_FILE_SIZE,
+    FileBlockIndex, InodeHandle, InodeHolder, InodeHolderMut, InodeIndex, InodeReference,
+    MAX_FILE_SIZE,
 };
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
@@ -45,14 +46,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
         let mut open_counter = self.fs.open_counter.lock();
         let still_open = open_counter.decrement(inode.0)?.is_some();
 
-        if !still_open {
-            let mut guard = inode.write();
-            if guard.nlink == 0 {
-                self.fs
-                    .inodes
-                    .free(&mut guard, inode.0, &self.fs.alloc, &self.fs.device)?;
-            }
-        } else {
+        let mut guard = inode.write();
+        if guard.nlink == 0 && !still_open {
+            self.fs
+                .inodes
+                .free(&mut guard, &self.fs.alloc, &self.fs.device)?;
+
+            log::info!("{:?} unlink on close", inode.index())
+        } else if guard.nlink == 0 {
             log::warn!(
                 "{:?} is dangling (0 links and still open), unlinking on close",
                 inode.index()
@@ -78,6 +79,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Drop for RawFileHandle<D> {
 pub(crate) struct OpenCounter(BTreeMap<InodeIndex, NonZeroU16>);
 
 impl OpenCounter {
+    pub(crate) fn is_open(&self, index: InodeIndex) -> bool {
+        self.0.contains_key(&index)
+    }
+
     pub(crate) fn increment(&mut self, index: InodeIndex) -> Result<NonZeroU16, Error> {
         let count = match self.0.entry(index) {
             Entry::Occupied(mut e) => {
@@ -193,10 +198,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
     }
 
     pub fn pwrite(&self, position: i64, data: &[u8]) -> Result<usize, Error> {
-        let Some(InodeHandle(inode_index, inode)) = self.0.inode() else {
+        let Some(inode) = self.0.inode() else {
             return Err(Error::Invalid);
         };
-
+        let inode_index = inode.index();
         let position = position.try_into().unwrap();
         let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
         let data = &data[..data_length];
@@ -213,7 +218,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
 
             if let Ok(op_data) = op_data.try_into() {
                 log::debug!("{inode_index:?} full write to {data_block:?}");
-                guard.write_block(*inode_index, &self.0.fs, data_block, op_data)?;
+                guard.write_block(&self.0.fs, data_block, op_data)?;
             } else {
                 let mut buffer = if let Some(buffer) = guard.read_block(&self.0.fs, data_block)? {
                     log::debug!(
@@ -232,7 +237,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
                 };
 
                 buffer[offset..offset + op_data.len()].copy_from_slice(op_data);
-                guard.write_block(*inode_index, &self.0.fs, data_block, &buffer)?;
+                guard.write_block(&self.0.fs, data_block, &buffer)?;
             }
 
             if !data_remaining.is_empty() {
@@ -242,7 +247,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
         }
 
         guard.size = std::cmp::max(guard.size, position + data.len() as u64);
-        self.0.fs.inodes.dirty_inode_block(*inode_index);
+        self.0.fs.inodes.dirty_inode_block(inode.index());
 
         Ok(data.len())
     }

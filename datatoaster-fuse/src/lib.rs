@@ -253,6 +253,19 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         }
     }
 
+    fn unlink(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        reply: fuser::ReplyEmpty,
+    ) {
+        match self.inner.unlink(parent, name.as_bytes()) {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.into()),
+        }
+    }
+
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         match self.inner.stat(ino) {
             Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),

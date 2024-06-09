@@ -267,7 +267,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let guard = inode.read();
 
         let dir_inode = guard.as_dir()?;
-        let (_, _, dirent) = dir_inode.lookup(&self.0, name)?;
+        let (_, offset, block) = dir_inode.lookup(&self.0, name)?;
+        let dirent = &block.0[offset];
 
         self.stat(dirent.inode().unwrap().get())
     }
@@ -306,12 +307,81 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let mut guard = guard.upgrade();
         let mut dir_inode = guard.as_dir_mut()?;
 
-        dir_inode.insert_dirent(parent_inode, &self.0, &new_dirent)?;
+        dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
         self.0.inodes.dirty_inode_block(parent_inode);
 
         let fh = self.open(new_inode.index().into())?;
         Ok((fh, stat))
+    }
+
+    pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let guard = inode.upgradable_read();
+
+        let dir_inode = guard.as_dir()?;
+
+        let (block_num, offset, mut block) = dir_inode.lookup(&self.0, name)?;
+        let dirent = &block.0[offset];
+        if dirent.kind() == Some(InodeType::Directory) {
+            return Err(Error::IsDirectory);
+        }
+
+        let child_index = self
+            .0
+            .inodes
+            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
+        let child_inode = self.0.inodes.get_handle(child_index, &self.0.device)?;
+        let mut guard = guard.upgrade();
+        let mut dir_inode = guard.as_dir_mut()?;
+
+        let open_counter = self.0.open_counter.lock();
+        let still_open = open_counter.is_open(child_inode.index());
+        let mut child_guard = child_inode.write();
+        drop(open_counter);
+
+        if child_guard.nlink == 0 {
+            log::error!("Double unlink on {child_index:?}");
+            return Err(Error::Invalid);
+        }
+
+        if dir_inode.size == 0 {
+            log::error!("Invalid directory size in {parent_inode:?}");
+            return Err(Error::Invalid);
+        }
+
+        dir_inode.size -= 1;
+        child_guard.nlink -= 1;
+
+        block.0[offset] = DiskDirEntry::zeroed();
+        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
+
+        if child_guard.nlink == 0 && !still_open {
+            self.0
+                .inodes
+                .free(&mut child_guard, &self.0.alloc, &self.0.device)?;
+        } else if child_guard.nlink == 0 {
+            log::info!(
+                "{:?} was unlinked and will be freed on close",
+                dir_inode.index()
+            );
+            self.0.inodes.dirty_inode_block(child_guard.index());
+        } else {
+            log::info!(
+                "{:?} unlink, still {} reference counts",
+                dir_inode.index(),
+                child_guard.nlink
+            );
+            self.0.inodes.dirty_inode_block(child_guard.index());
+        }
+        self.0.inodes.dirty_inode_block(dir_inode.index());
+
+        Ok(())
     }
 
     pub fn format(device: &D) -> Result<(), Error> {
