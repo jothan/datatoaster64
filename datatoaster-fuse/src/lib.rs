@@ -266,6 +266,33 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         }
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        let res = self.inner.mkdir(parent, name.as_bytes(), mode);
+        let res = res.and_then(|r| {
+            self.inner.sync()?;
+            Ok(r)
+        });
+
+        match res {
+            Ok(stat) => {
+                let attr = Stat::from(stat).into();
+                reply.entry(&Duration::new(0, 0), &attr, 0);
+            }
+            Err(e) => {
+                log::error!("MKDIR error: {e:?}");
+                reply.error(e.into())
+            }
+        }
+    }
+
     fn getattr(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyAttr) {
         match self.inner.stat(ino) {
             Ok(s) => reply.attr(&Duration::new(0, 0), &Stat::from(s).into()),
@@ -289,7 +316,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
             return;
         };
 
-        let mut buffer = unsafe { Box::new_zeroed_slice(size as usize).assume_init() };
+        let mut buffer = bytemuck::zeroed_slice_box(size as usize);
 
         match handle.pread(offset, &mut buffer) {
             Ok(read) => reply.data(&buffer[..read]),

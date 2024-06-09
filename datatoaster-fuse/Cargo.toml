@@ -13,6 +13,7 @@ signal-hook = "0.3"
 anyhow = "1.0"
 slotmap = "1.0"
 log = "0.4"
+bytemuck = { version = "1.16", features = ["extern_crate_alloc"] }
 
 [lints]
 workspace = true

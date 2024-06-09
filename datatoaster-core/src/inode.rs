@@ -100,6 +100,8 @@ unsafe impl bytemuck::PodInOption for InodeIndex {}
 pub(crate) struct FileBlockIndex(usize);
 
 impl FileBlockIndex {
+    pub(crate) const FIRST: FileBlockIndex = FileBlockIndex(0);
+
     pub(crate) fn from_file_position(position: u64) -> Result<(FileBlockIndex, usize), Error> {
         if position > MAX_FILE_SIZE {
             return Err(Error::OutOfSpace);
@@ -221,8 +223,14 @@ pub(crate) struct Inode {
 impl Inode {
     pub(crate) fn new_file(perm: u16) -> Self {
         let mut f = Inode::zeroed();
-        f.nlink = 1;
         f.kind = InodeType::File as _;
+        f.perm = perm;
+        f
+    }
+
+    pub(crate) fn new_directory(perm: u16) -> Self {
+        let mut f = Inode::zeroed();
+        f.kind = InodeType::Directory as _;
         f.perm = perm;
         f
     }

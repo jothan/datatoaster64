@@ -5,12 +5,15 @@ extern crate no_std_compat as std;
 use std::prelude::v1::*;
 
 use std::num::NonZeroU64;
+use std::ops::Deref;
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use filehandle::{OpenCounter, RawFileHandle};
-use inode::{InodeHolder, InodeHolderMut, InodeReference};
+use inode::{
+    FileBlockIndex, InodeHandleUpgradableRead, InodeHolder, InodeHolderMut, InodeReference,
+};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -265,45 +268,86 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         self.stat(dirent.inode().unwrap().get())
     }
 
+    fn create_check(&self, guard: &InodeHandleUpgradableRead, name: &[u8]) -> Result<(), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let dir_inode = guard.as_dir()?;
+        if dir_inode.is_full() {
+            return Err(Error::OutOfSpace);
+        }
+
+        match dir_inode.lookup(&self.0, name) {
+            Ok(_) => Err(Error::AlreadyExists),
+            Err(Error::NotFound) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn create(
         &self,
         parent_inode: u64,
         name: &[u8],
         mode: u32,
     ) -> Result<(FileHandle<D>, Stat), Error> {
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
-
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
         let guard = inode.upgradable_read();
 
-        let dir_inode = guard.as_dir()?;
-
-        if dir_inode.is_full() {
-            return Err(Error::OutOfSpace);
-        }
-
-        match dir_inode.lookup(&self.0, name) {
-            Ok(_) => return Err(Error::AlreadyExists),
-            Err(Error::NotFound) => (),
-            Err(e) => return Err(e),
-        };
+        self.create_check(&guard, name)?;
 
         let new_inode_value = Inode::new_file(mode as u16 /* lossy !*/);
         let new_inode = self.0.inodes.alloc(self.0.clone(), &new_inode_value)?;
         let new_dirent = DiskDirEntry::new_file(new_inode.index(), name)?;
-        let stat = Stat::new(new_inode.index(), &new_inode_value)?;
 
         let mut guard = guard.upgrade(self.0.clone());
         let mut dir_inode = guard.as_dir_mut()?;
 
         dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
+        let mut new_inode_guard = new_inode.write(self.0.clone());
+        new_inode_guard.nlink = 1;
+
+        let stat = Stat::new(new_inode.index(), &new_inode_guard)?;
+        drop(new_inode_guard);
 
         let fh = self.open(new_inode.index().into())?;
         Ok((fh, stat))
+    }
+
+    pub fn mkdir(&self, parent_inode: u64, name: &[u8], mode: u32) -> Result<Stat, Error> {
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let guard = inode.upgradable_read();
+
+        self.create_check(&guard, name)?;
+
+        let new_inode_value = Inode::new_directory(mode as u16 /* lossy !*/);
+        let child_inode = self.0.inodes.alloc(self.0.clone(), &new_inode_value)?;
+        let child_dirent = DiskDirEntry::new_directory(child_inode.index(), name)?;
+
+        let mut parent_guard = guard.upgrade(self.0.clone());
+        let mut parent_dir_inode = parent_guard.as_dir_mut()?;
+
+        let mut child_guard = child_inode.write(self.0.clone());
+
+        parent_dir_inode.insert_dirent(&self.0, &child_dirent)?;
+        parent_dir_inode.size = parent_dir_inode.size.checked_add(1).unwrap();
+        child_guard.nlink += 1;
+
+        let block = DirEntryBlock::new_first_block(child_guard.index(), parent_guard.index());
+
+        child_guard.write_block(
+            &self.0,
+            FileBlockIndex::FIRST,
+            bytemuck::must_cast_ref(block.deref()),
+        )?;
+        child_guard.size = 2;
+        child_guard.nlink += 1;
+        parent_guard.nlink = parent_guard.nlink.checked_add(1).unwrap();
+
+        Stat::new(child_guard.index(), &child_guard)
     }
 
     pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
@@ -391,7 +435,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             DirEntryBlock::new_first_block(ROOT_DIRECTORY_INODE, ROOT_DIRECTORY_INODE);
         device.write(
             root_dir_data.into(),
-            bytemuck::must_cast_ref(&root_dir_contents),
+            bytemuck::must_cast_ref(root_dir_contents.deref()),
         )?;
 
         // Create the root directory inode

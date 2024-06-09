@@ -120,13 +120,16 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
 pub(crate) struct DirEntryBlock(pub(crate) [DiskDirEntry; DIRENTRY_PER_BLOCK]);
 
 impl DirEntryBlock {
-    pub(crate) fn new_first_block(inode: InodeIndex, parent: InodeIndex) -> DirEntryBlock {
-        let mut block = [Zeroable::zeroed(); DIRENTRY_PER_BLOCK];
+    pub(crate) fn new_first_block(
+        inode: InodeIndex,
+        parent: InodeIndex,
+    ) -> BufferBox<DirEntryBlock> {
+        let mut block: BufferBox<DirEntryBlock> = bytemuck::zeroed_box();
 
-        block[0] = DiskDirEntry::new_directory(inode, b".").unwrap();
-        block[1] = DiskDirEntry::new_directory(parent, b"..").unwrap();
+        block.0[0] = DiskDirEntry::new_directory(inode, b".").unwrap();
+        block.0[1] = DiskDirEntry::new_directory(parent, b"..").unwrap();
 
-        DirEntryBlock(block)
+        block
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &DiskDirEntry> {
