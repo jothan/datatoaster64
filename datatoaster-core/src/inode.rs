@@ -3,17 +3,18 @@ use std::prelude::v1::*;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};
 use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard};
-use spin::lock_api::{Mutex, RwLock};
+use spin::lock_api::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
 
 use crate::bitmap::BitmapAllocator;
 use crate::buffers::{BlockBuffer, BufferBox};
+use crate::directory::{DirectoryInode, DirectoryInodeMut};
 use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
 // FIXME: implement indirect blocks
@@ -34,7 +35,7 @@ impl From<InodeBlockIndex> for BlockIndex {
 
 #[derive(bytemuck::TransparentWrapper, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub(crate) struct InodeIndex(pub(crate) NonZeroU64);
+pub(crate) struct InodeIndex(NonZeroU64);
 
 impl InodeIndex {
     fn ordinal(&self) -> u64 {
@@ -45,6 +46,50 @@ impl InodeIndex {
 impl From<InodeIndex> for u64 {
     fn from(value: InodeIndex) -> Self {
         value.0.get()
+    }
+}
+
+impl From<InodeIndex> for NonZeroU64 {
+    fn from(value: InodeIndex) -> Self {
+        value.0
+    }
+}
+
+pub(crate) trait InodeReference {
+    fn index(&self) -> InodeIndex;
+}
+
+pub(crate) trait InodeHolder: InodeReference + Deref<Target = Inode> {
+    fn as_dir(&self) -> Result<DirectoryInode<'_>, Error> {
+        DirectoryInode::new(self)
+    }
+}
+
+impl<T: InodeReference + Deref<Target = Inode>> InodeHolder for T {}
+
+pub(crate) trait InodeHolderMut: InodeHolder + DerefMut {
+    fn as_dir_mut(&mut self) -> Result<DirectoryInodeMut<'_>, Error> {
+        DirectoryInodeMut::new(self)
+    }
+}
+
+impl<T: InodeHolder + DerefMut> InodeHolderMut for T {}
+
+impl InodeReference for InodeHandleRead<'_> {
+    fn index(&self) -> InodeIndex {
+        self.0
+    }
+}
+
+impl InodeReference for InodeHandleUpgradableRead<'_> {
+    fn index(&self) -> InodeIndex {
+        self.0
+    }
+}
+
+impl InodeReference for InodeHandleWrite<'_> {
+    fn index(&self) -> InodeIndex {
+        self.0
     }
 }
 
@@ -186,6 +231,13 @@ impl Inode {
         f
     }
 
+    pub(crate) fn assert_is_directory(&self) -> Result<(), Error> {
+        if InodeType::try_from(self.kind)? != InodeType::Directory {
+            return Err(Error::NotDirectory);
+        }
+        Ok(())
+    }
+
     // Returns None if reading a hole
     // FIXME: returning a big value.
     pub(crate) fn read_block<D: BlockAccess<BLOCK_SIZE>>(
@@ -257,6 +309,75 @@ impl From<&InodeBlockSnapshot> for RawInodeBlock {
 }
 
 pub(crate) struct InodeHandle(pub(crate) InodeIndex, pub(crate) Arc<RwLock<Inode>>);
+pub(crate) struct InodeHandleRead<'a>(InodeIndex, RwLockReadGuard<'a, Inode>);
+pub(crate) struct InodeHandleUpgradableRead<'a>(InodeIndex, RwLockUpgradableReadGuard<'a, Inode>);
+pub(crate) struct InodeHandleWrite<'a>(InodeIndex, RwLockWriteGuard<'a, Inode>);
+
+impl<'a> Deref for InodeHandleRead<'a> {
+    type Target = Inode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+
+impl<'a> InodeHandleUpgradableRead<'a> {
+    pub(crate) fn upgrade(self) -> InodeHandleWrite<'a> {
+        let guard = RwLockUpgradableReadGuard::upgrade(self.1);
+        InodeHandleWrite(self.0, guard)
+    }
+}
+
+impl<'a> Deref for InodeHandleUpgradableRead<'a> {
+    type Target = Inode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+
+impl<'a> InodeHandleWrite<'a> {
+    #[allow(dead_code)]
+    pub(crate) fn downgrade(self) -> InodeHandleRead<'a> {
+        let guard = RwLockWriteGuard::downgrade(self.1);
+        InodeHandleRead(self.0, guard)
+    }
+}
+
+impl<'a> Deref for InodeHandleWrite<'a> {
+    type Target = Inode;
+
+    fn deref(&self) -> &Self::Target {
+        &self.1
+    }
+}
+
+impl<'a> DerefMut for InodeHandleWrite<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.1
+    }
+}
+
+impl InodeHandle {
+    pub(crate) fn read(&self) -> InodeHandleRead<'_> {
+        InodeHandleRead(self.0, self.1.read())
+    }
+
+    pub(crate) fn upgradable_read(&self) -> InodeHandleUpgradableRead<'_> {
+        InodeHandleUpgradableRead(self.0, self.1.upgradable_read())
+    }
+
+    pub(crate) fn write(&self) -> InodeHandleWrite<'_> {
+        InodeHandleWrite(self.0, self.1.write())
+    }
+}
+
+impl InodeReference for InodeHandle {
+    fn index(&self) -> InodeIndex {
+        self.0
+    }
+}
+
 struct InodeBlock(pub(crate) [Arc<RwLock<Inode>>; INODES_PER_BLOCK]);
 
 impl InodeBlock {

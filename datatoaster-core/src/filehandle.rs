@@ -7,7 +7,9 @@ use std::sync::Arc;
 use datatoaster_traits::BlockAccess;
 
 use crate::directory::DirectoryInode;
-use crate::inode::{FileBlockIndex, InodeHandle, InodeIndex, MAX_FILE_SIZE};
+use crate::inode::{
+    FileBlockIndex, InodeHandle, InodeHolder, InodeIndex, InodeReference, MAX_FILE_SIZE,
+};
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
@@ -44,12 +46,17 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
         let still_open = open_counter.decrement(inode.0)?.is_some();
 
         if !still_open {
-            let mut guard = inode.1.write();
+            let mut guard = inode.write();
             if guard.nlink == 0 {
                 self.fs
                     .inodes
                     .free(&mut guard, inode.0, &self.fs.alloc, &self.fs.device)?;
             }
+        } else {
+            log::warn!(
+                "{:?} is dangling (0 links and still open), unlinking on close",
+                inode.index()
+            )
         }
         Ok(())
     }
@@ -109,13 +116,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
         start: u64,
         mut f: impl FnMut(u64, DirEntry) -> bool,
     ) -> Result<(), Error> {
-        let Some(InodeHandle(_, inode)) = self.0.inode() else {
+        let Some(inode_handle) = self.0.inode() else {
             return Err(Error::Invalid);
         };
-        let guard = inode.read();
+        let guard = inode_handle.read();
 
         // Summon the ancient one
-        let dir_inode = DirectoryInode::try_from(&*guard)?;
+        let dir_inode: DirectoryInode = guard.as_dir()?;
         let mut chutulu = dir_inode.readdir_iter(&self.0.fs, start)?;
 
         while let Some((offset, direntry)) = chutulu.next().transpose()? {

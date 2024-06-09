@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use filehandle::{OpenCounter, RawFileHandle};
-use lock_api::RwLockUpgradableReadGuard;
+use inode::{InodeHolder, InodeHolderMut};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -24,7 +24,7 @@ mod inode;
 mod superblock;
 
 use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
-use crate::directory::{DirEntryBlock, DirectoryInode, DirectoryInodeMut, DiskDirEntry};
+use crate::directory::{DirEntryBlock, DiskDirEntry};
 use crate::inode::{
     Inode, InodeAllocator, InodeIndex, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE,
 };
@@ -264,13 +264,11 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
-        let guard = inode.1.read();
+        let guard = inode.read();
 
-        let dir_inode = DirectoryInode::try_from(&*guard)?;
+        let dir_inode = guard.as_dir()?;
         let (_, _, dirent) = dir_inode.lookup(&self.0, name)?;
 
-        drop(guard);
-        drop(inode);
         self.stat(dirent.inode().unwrap().get())
     }
 
@@ -286,9 +284,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
-        let guard = inode.1.upgradable_read();
+        let guard = inode.upgradable_read();
 
-        let dir_inode = DirectoryInode::try_from(&*guard)?;
+        let dir_inode = guard.as_dir()?;
 
         if dir_inode.is_full() {
             return Err(Error::OutOfSpace);
@@ -300,43 +298,17 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             Err(e) => return Err(e),
         };
 
-        let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
-        let mut dir_inode = DirectoryInodeMut::try_from(&mut *guard)?;
-
         let new_inode_value = Inode::new_file(mode as u16 /* lossy !*/);
         let new_inode = self.0.inodes.alloc(&self.0.device, |_| new_inode_value)?;
         let new_dirent = DiskDirEntry::new_file(new_inode.0, name)?;
         let stat = Stat::try_from((new_inode.0, &new_inode_value))?;
 
-        if dir_inode.as_ref().nb_slots_free() == 0 {
-            // Allocate a fresh directory block
-            let new_block = dir_inode.as_inner().first_hole().ok_or(Error::Invalid)?;
+        let mut guard = guard.upgrade();
+        let mut dir_inode = guard.as_dir_mut()?;
 
-            let mut block_data = DirEntryBlock::zeroed();
-            block_data.0[0] = new_dirent;
-
-            dir_inode.as_inner().write_block(
-                inode.0,
-                &self.0,
-                new_block,
-                bytemuck::must_cast_ref(&block_data),
-            )?;
-        } else {
-            // Insert into an existing block
-            let (block_num, offset, mut block_data) = dir_inode.as_ref().free_slot(&self.0)?;
-            block_data.0[offset] = new_dirent;
-            dir_inode.as_inner().write_block(
-                inode.0,
-                &self.0,
-                block_num,
-                bytemuck::must_cast_ref(&*block_data),
-            )?;
-        }
-
-        guard.size = guard.size.checked_add(1).unwrap();
+        dir_inode.insert_dirent(parent_inode, &self.0, &new_dirent)?;
+        dir_inode.size = dir_inode.size.checked_add(1).unwrap();
         self.0.inodes.dirty_inode_block(parent_inode);
-
-        drop(guard);
 
         let fh = self.open(new_inode.0.into())?;
         Ok((fh, stat))

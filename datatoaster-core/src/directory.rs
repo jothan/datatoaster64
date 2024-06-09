@@ -1,12 +1,13 @@
 use std::prelude::v1::*;
 
 use std::num::NonZeroU64;
+use std::ops::{Deref, DerefMut};
 
 use bytemuck::Zeroable;
 use itertools::Itertools;
 
 use crate::buffers::BufferBox;
-use crate::inode::{Inode, InodeIndex, InodeType};
+use crate::inode::{Inode, InodeHolder, InodeHolderMut, InodeIndex, InodeReference, InodeType};
 use crate::{
     inode::{FileBlockIndex, NB_DIRECT_BLOCKS},
     BlockAccess, Error, FilesystemInner, BLOCK_SIZE,
@@ -63,7 +64,7 @@ impl DiskDirEntry {
     }
 
     pub(crate) fn inode(&self) -> Option<NonZeroU64> {
-        self.inode.map(|i| i.0)
+        self.inode.map(Into::into)
     }
 }
 
@@ -101,7 +102,7 @@ impl TryFrom<&DiskDirEntry> for DirEntry {
         name.extend_from_slice(value.name()).unwrap();
 
         Ok(DirEntry {
-            inode: inode.0,
+            inode: inode.into(),
             kind,
             name,
         })
@@ -157,29 +158,29 @@ impl IntoIterator for DirEntryBlock {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct DirectoryInode<'inode>(&'inode Inode);
+pub(crate) struct DirectoryInode<'inode>(InodeIndex, &'inode Inode);
 
-impl<'inode> TryFrom<&'inode Inode> for DirectoryInode<'inode> {
-    type Error = Error;
-
-    fn try_from(value: &'inode Inode) -> Result<Self, Self::Error> {
-        if InodeType::try_from(value.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
-        }
-        Ok(DirectoryInode(value))
+impl<'inode> InodeReference for DirectoryInode<'inode> {
+    fn index(&self) -> InodeIndex {
+        self.0
     }
 }
 
 impl<'inode> DirectoryInode<'inode> {
+    pub(crate) fn new<H: InodeHolder + ?Sized>(holder: &'inode H) -> Result<Self, Error> {
+        holder.deref().assert_is_directory()?;
+        Ok(DirectoryInode(holder.index(), holder.deref()))
+    }
+
     fn block_iter<D: BlockAccess<BLOCK_SIZE>>(
         self,
         fs: &'inode FilesystemInner<D>,
     ) -> Result<
-        impl Iterator<Item = Result<(FileBlockIndex, Option<BufferBox<DirEntryBlock>>), Error>> + '_,
+        impl Iterator<Item = Result<(FileBlockIndex, Option<BufferBox<DirEntryBlock>>), Error>> + 'inode,
         Error,
     > {
         Ok(self
-            .0
+            .1
             .data_block_iter(fs)
             .map_ok(|(block_num, byte_block)| {
                 (
@@ -270,39 +271,89 @@ impl<'inode> DirectoryInode<'inode> {
     }
 
     pub(crate) fn nb_slots_free(self) -> usize {
-        let nb_alloc_slots = self.0.nb_alloc_blocks() * DIRENTRY_PER_BLOCK;
-        nb_alloc_slots.checked_sub(self.0.size as usize).unwrap()
+        let nb_alloc_slots = self.nb_alloc_blocks() * DIRENTRY_PER_BLOCK;
+        nb_alloc_slots.checked_sub(self.size as usize).unwrap()
     }
 
     pub(crate) fn is_full(self) -> bool {
-        self.0.nb_alloc_blocks() == NB_DIRECT_BLOCKS && self.nb_slots_free() == 0
+        self.nb_alloc_blocks() == NB_DIRECT_BLOCKS && self.nb_slots_free() == 0
     }
+}
 
-    #[allow(dead_code)]
-    pub(crate) fn as_inner(self) -> &'inode Inode {
+impl<'inode> Deref for DirectoryInode<'inode>
+where
+    Self: 'inode,
+{
+    type Target = Inode;
+
+    fn deref(&self) -> &Self::Target {
+        self.1
+    }
+}
+
+pub(crate) struct DirectoryInodeMut<'inode>(InodeIndex, &'inode mut Inode);
+
+impl<'inode> InodeReference for DirectoryInodeMut<'inode> {
+    fn index(&self) -> InodeIndex {
         self.0
     }
 }
 
-pub(crate) struct DirectoryInodeMut<'inode>(&'inode mut Inode);
+impl<'inode> Deref for DirectoryInodeMut<'inode> {
+    type Target = Inode;
 
-impl<'inode> TryFrom<&'inode mut Inode> for DirectoryInodeMut<'inode> {
-    type Error = Error;
+    fn deref(&self) -> &Self::Target {
+        self.1
+    }
+}
 
-    fn try_from(value: &'inode mut Inode) -> Result<Self, Self::Error> {
-        if InodeType::try_from(value.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
-        }
-        Ok(DirectoryInodeMut(value))
+impl<'inode> DerefMut for DirectoryInodeMut<'inode> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.1
     }
 }
 
 impl<'inode> DirectoryInodeMut<'inode> {
-    pub(crate) fn as_ref(&self) -> DirectoryInode<'_> {
-        DirectoryInode(self.0)
+    pub(crate) fn new<H: InodeHolderMut + ?Sized>(holder: &'inode mut H) -> Result<Self, Error> {
+        holder.assert_is_directory()?;
+        Ok(DirectoryInodeMut(holder.index(), holder))
     }
 
-    pub(crate) fn as_inner(&mut self) -> &mut Inode {
-        self.0
+    pub(crate) fn as_ref(&self) -> DirectoryInode<'_> {
+        DirectoryInode(self.index(), self.deref())
+    }
+
+    pub(crate) fn insert_dirent<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        dir_inode: InodeIndex,
+        fs: &FilesystemInner<D>,
+        new_dirent: &DiskDirEntry,
+    ) -> Result<(), Error> {
+        if self.as_ref().nb_slots_free() == 0 {
+            // Allocate a fresh directory block
+            let new_block = self.first_hole().ok_or(Error::Invalid)?;
+
+            let mut block_data = DirEntryBlock::zeroed();
+            block_data.0[0] = *new_dirent;
+
+            self.write_block(
+                dir_inode,
+                fs,
+                new_block,
+                bytemuck::must_cast_ref(&block_data),
+            )?;
+        } else {
+            // Insert into an existing block
+            let (block_num, offset, mut block_data) = self.as_ref().free_slot(fs)?;
+            block_data.0[offset] = *new_dirent;
+            self.write_block(
+                dir_inode,
+                fs,
+                block_num,
+                bytemuck::must_cast_ref(&*block_data),
+            )?;
+        }
+
+        Ok(())
     }
 }
