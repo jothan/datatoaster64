@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytemuck::Zeroable;
 use filehandle::{OpenCounter, RawFileHandle};
-use inode::{InodeHolder, InodeHolderMut};
+use inode::{InodeHolder, InodeHolderMut, InodeReference};
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -224,9 +224,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn stat(&self, inode_index: u64) -> Result<Stat, Error> {
         let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
         let inode = self.0.inodes.get_handle(inode_index, &self.0.device)?;
-        let guard = inode.1.read();
+        let guard = inode.read();
 
-        Stat::try_from((inode.0, &*guard))
+        Stat::new(guard.index(), &guard)
     }
 
     pub fn opendir(&self, inode_index: u64) -> Result<DirectoryHandle<D>, Error> {
@@ -299,9 +299,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         };
 
         let new_inode_value = Inode::new_file(mode as u16 /* lossy !*/);
-        let new_inode = self.0.inodes.alloc(&self.0.device, |_| new_inode_value)?;
-        let new_dirent = DiskDirEntry::new_file(new_inode.0, name)?;
-        let stat = Stat::try_from((new_inode.0, &new_inode_value))?;
+        let new_inode = self.0.inodes.alloc(&self.0.device, &new_inode_value)?;
+        let new_dirent = DiskDirEntry::new_file(new_inode.index(), name)?;
+        let stat = Stat::new(new_inode.index(), &new_inode_value)?;
 
         let mut guard = guard.upgrade();
         let mut dir_inode = guard.as_dir_mut()?;
@@ -310,7 +310,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
         self.0.inodes.dirty_inode_block(parent_inode);
 
-        let fh = self.open(new_inode.0.into())?;
+        let fh = self.open(new_inode.index().into())?;
         Ok((fh, stat))
     }
 

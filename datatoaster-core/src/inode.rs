@@ -7,7 +7,7 @@ use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use lock_api::{ArcRwLockReadGuard, ArcRwLockWriteGuard};
+use lock_api::ArcRwLockReadGuard;
 use spin::lock_api::{Mutex, RwLock, RwLockReadGuard, RwLockUpgradableReadGuard, RwLockWriteGuard};
 
 use datatoaster_traits::{BlockAccess, BlockIndex};
@@ -166,19 +166,15 @@ pub struct Stat {
     pub size: u64,
 }
 
-impl TryFrom<(InodeIndex, &Inode)> for Stat {
-    type Error = Error;
-
-    fn try_from(value: (InodeIndex, &Inode)) -> Result<Self, Self::Error> {
-        let inode = value.0 .0.get();
-        let kind = value.1.kind.try_into()?;
-        let nlink = value.1.nlink;
-        let perm = value.1.perm;
-        let uid = value.1.uid;
-        let gid = value.1.gid;
+impl Stat {
+    pub(crate) fn new(index: InodeIndex, inode: &Inode) -> Result<Self, Error> {
+        let kind = inode.kind.try_into()?;
+        let nlink = inode.nlink;
+        let perm = inode.perm;
+        let uid = inode.uid;
+        let gid = inode.gid;
         let blksize = BLOCK_SIZE.try_into().map_err(|_| Error::Invalid)?;
-        let blocks_raw = value
-            .1
+        let blocks_raw = inode
             .direct_blocks
             .iter()
             .filter_map(|b| b.as_ref())
@@ -190,11 +186,11 @@ impl TryFrom<(InodeIndex, &Inode)> for Stat {
             InodeType::Directory => (blocks_raw * BLOCK_SIZE)
                 .try_into()
                 .map_err(|_| Error::Invalid)?,
-            InodeType::File => value.1.size,
+            InodeType::File => inode.size,
         };
 
         Ok(Stat {
-            inode,
+            inode: index.into(),
             kind,
             nlink,
             perm,
@@ -394,8 +390,38 @@ impl From<&RawInodeBlock> for BufferBox<InodeBlock> {
     }
 }
 
+#[derive(Default)]
+struct InodeBlocks(BTreeMap<InodeBlockIndex, InodeBlock>);
+
+impl InodeBlocks {
+    fn get<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        block_index: InodeBlockIndex,
+        device: &D,
+    ) -> Result<&mut InodeBlock, Error> {
+        match self.0.entry(block_index) {
+            Entry::Vacant(e) => {
+                let raw_block = InodeAllocator::read_block(block_index, device)?;
+                let block = BufferBox::<InodeBlock>::from(&*raw_block);
+                Ok(e.insert(*block))
+            }
+            Entry::Occupied(e) => Ok(e.into_mut()),
+        }
+    }
+
+    fn handle<D: BlockAccess<BLOCK_SIZE>>(
+        &mut self,
+        block_index: InodeBlockIndex,
+        offset: usize,
+        device: &D,
+    ) -> Result<Arc<RwLock<Inode>>, Error> {
+        let block = self.get(block_index, device)?;
+        Ok(block.0[offset].clone())
+    }
+}
+
 pub(crate) struct InodeAllocator {
-    blocks: Mutex<BTreeMap<InodeBlockIndex, InodeBlock>>,
+    blocks: Mutex<InodeBlocks>,
     dirty_blocks: Mutex<BTreeSet<InodeBlockIndex>>,
     alloc_cursor: Mutex<InodeBlockIndex>,
     block_range: Range<InodeBlockIndex>,
@@ -419,26 +445,9 @@ impl InodeAllocator {
         index: InodeIndex,
         device: &D,
     ) -> Result<InodeHandle, Error> {
-        let (block_index, block_offset) = self.inode_index_location(index);
-
-        let h = self.get_block(block_index, device, |block| block.0[block_offset].clone())?;
-        Ok(InodeHandle(index, h))
-    }
-
-    fn get_block<D: BlockAccess<BLOCK_SIZE>, T>(
-        &self,
-        block_index: InodeBlockIndex,
-        device: &D,
-        f: impl FnOnce(&InodeBlock) -> T,
-    ) -> Result<T, Error> {
-        match self.blocks.lock().entry(block_index) {
-            Entry::Vacant(e) => {
-                let raw_block = Self::read_block(block_index, device)?;
-                let block = BufferBox::<InodeBlock>::from(&*raw_block);
-                Ok(f(e.insert(*block)))
-            }
-            Entry::Occupied(e) => Ok(f(e.get())),
-        }
+        let (block_index, offset) = self.inode_index_location(index);
+        let arc = self.blocks.lock().handle(block_index, offset, device)?;
+        Ok(InodeHandle(index, arc))
     }
 
     fn read_block<D: BlockAccess<BLOCK_SIZE>>(
@@ -476,8 +485,8 @@ impl InodeAllocator {
 
             // The lock order is very important here.
             let snapshot = {
-                let blocks = self.blocks.lock();
-                blocks.get(&block_index).unwrap().snapshot()
+                let mut blocks = self.blocks.lock();
+                blocks.get(block_index, device).unwrap().snapshot()
             };
 
             dirty_guard = self.dirty_blocks.lock();
@@ -490,39 +499,46 @@ impl InodeAllocator {
     pub(crate) fn alloc<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         device: &D,
-        init: impl FnOnce(InodeIndex) -> Inode,
+        value: &Inode,
     ) -> Result<InodeHandle, Error> {
+        if value.kind == InodeType::Free as _ {
+            return Err(Error::Invalid);
+        }
+
         let cursor = *self.alloc_cursor.lock();
         let mut iter = (cursor.0..self.block_range.end.0).chain(self.block_range.start.0..cursor.0);
 
         for block_index in &mut iter {
             let block_index = InodeBlockIndex(block_index);
-            let scan_result = self.get_block(block_index, device, move |block| {
-                block.0.iter().enumerate().find_map(|(i, inode)| {
-                    if Arc::strong_count(inode) == 1 {
-                        let inode = inode.write_arc();
-                        let index = self.inode_index_from_location(block_index, i);
+            let mut blocks = self.blocks.lock();
+            let block = blocks.get(block_index, device)?;
 
-                        Some((index, inode)).filter(|(_, inode)| inode.kind == InodeType::Free as _)
-                    } else {
-                        None
-                    }
+            let scan_result = block
+                .0
+                .iter()
+                .enumerate()
+                .filter_map(|(o, arc)| {
+                    arc.try_upgradable_read()
+                        .filter(|g| g.kind == InodeType::Free as _)
+                        .map(|g| (o, arc, g))
                 })
-            })?;
+                .next();
 
-            let Some((index, mut inode)) = scan_result else {
+            let Some((offset, arc, guard)) = scan_result else {
                 continue;
             };
-            let inode_arc = ArcRwLockWriteGuard::rwlock(&inode).clone();
+            let index = self.inode_index_from_location(block_index, offset);
 
-            *inode = init(index);
-            assert!(inode.kind != InodeType::Free as _);
+            let mut guard = RwLockUpgradableReadGuard::upgrade(guard);
+            let handle = InodeHandle(index, arc.clone());
+
+            *guard = *value;
+
             log::debug!("alloc {index:?}");
             self.dirty_inode_block(index);
-            drop(inode);
 
             *self.alloc_cursor.lock() = block_index;
-            return Ok(InodeHandle(index, inode_arc));
+            return Ok(handle);
         }
 
         log::error!("alloc failed");
