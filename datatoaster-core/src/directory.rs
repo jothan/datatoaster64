@@ -27,17 +27,33 @@ pub(crate) struct DiskDirEntry {
 
 impl DiskDirEntry {
     fn new(inode: InodeIndex, name: &[u8], kind: InodeType) -> Result<DiskDirEntry, Error> {
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
-
         let mut dirent = DiskDirEntry {
             inode: Some(inode),
             kind: kind as _,
             name: [0; MAX_FILENAME_LENGTH],
         };
 
-        dirent.name[..name.len()].copy_from_slice(name);
+        dirent.set_name(name)?;
+        Ok(dirent)
+    }
+
+    pub(crate) fn set_name(&mut self, name: &[u8]) -> Result<(), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+        self.name[..name.len()].copy_from_slice(name);
+        self.name[name.len()..].fill(0);
+
+        Ok(())
+    }
+
+    pub(crate) fn for_inode<H: InodeHolder>(inode: &H, name: &[u8]) -> Result<Self, Error> {
+        let mut dirent = DiskDirEntry {
+            inode: Some(inode.index()),
+            kind: inode.kind as _,
+            name: [0; MAX_FILENAME_LENGTH],
+        };
+        dirent.set_name(name)?;
         Ok(dirent)
     }
 
@@ -69,6 +85,10 @@ impl DiskDirEntry {
 
     pub(crate) fn inode(&self) -> Option<NonZeroU64> {
         self.inode.map(Into::into)
+    }
+
+    pub(crate) fn set_inode(&mut self, index: InodeIndex) {
+        self.inode = index.into();
     }
 }
 

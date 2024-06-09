@@ -371,6 +371,28 @@ impl<'a> InodeHandleUpgradableRead<'a> {
         let guard = RwLockUpgradableReadGuard::upgrade(self.1);
         InodeHandleWrite::new(self.0, guard, fs)
     }
+
+    pub(crate) fn lock_two<'p, 'q>(
+        first: &'p InodeHandle,
+        second: &'q InodeHandle,
+    ) -> Option<(InodeHandleUpgradableRead<'p>, InodeHandleUpgradableRead<'q>)> {
+        for i in 0..16 {
+            let first_guard;
+            let second_guard;
+
+            if i & 1 == 0 {
+                second_guard = Some(second.upgradable_read());
+                first_guard = first.try_upgradable_read();
+            } else {
+                first_guard = Some(first.upgradable_read());
+                second_guard = second.try_upgradable_read();
+            }
+            if let (Some(first), Some(second)) = (first_guard, second_guard) {
+                return Some((first, second));
+            }
+        }
+        None
+    }
 }
 
 impl<'a> Deref for InodeHandleUpgradableRead<'a> {
@@ -454,6 +476,12 @@ impl InodeHandle {
 
     pub(crate) fn upgradable_read(&self) -> InodeHandleUpgradableRead<'_> {
         InodeHandleUpgradableRead(self.0, self.1.upgradable_read())
+    }
+
+    pub(crate) fn try_upgradable_read(&self) -> Option<InodeHandleUpgradableRead<'_>> {
+        self.1
+            .try_upgradable_read()
+            .map(|g| InodeHandleUpgradableRead(self.0, g))
     }
 
     pub(crate) fn write<D>(&self, fs: Arc<FilesystemInner<D>>) -> InodeHandleWrite<'_, D> {

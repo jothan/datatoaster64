@@ -366,6 +366,30 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
             Err(e) => reply.error(e.into()),
         }
     }
+
+    fn rename(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let res = self
+            .inner
+            .rename(parent, name.as_bytes(), newparent, newname.as_bytes())
+            .and_then(|r| {
+                self.inner.sync()?;
+                Ok(r)
+            });
+
+        match res {
+            Ok(_) => reply.ok(),
+            Err(e) => reply.error(e.into()),
+        }
+    }
 }
 
 struct Stat(datatoaster_core::Stat);

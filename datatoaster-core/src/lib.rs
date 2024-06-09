@@ -12,7 +12,8 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use filehandle::{OpenCounter, RawFileHandle};
 use inode::{
-    FileBlockIndex, InodeHandleUpgradableRead, InodeHolder, InodeHolderMut, InodeReference,
+    FileBlockIndex, InodeHandle, InodeHandleUpgradableRead, InodeHandleWrite, InodeHolder,
+    InodeHolderMut, InodeReference,
 };
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
@@ -275,11 +276,16 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     fn create_check(&self, guard: &InodeHandleUpgradableRead, name: &[u8]) -> Result<(), Error> {
+        let dir_inode = guard.as_dir()?;
+
         if name.len() > MAX_FILENAME_LENGTH {
             return Err(Error::NameTooLong);
         }
 
-        let dir_inode = guard.as_dir()?;
+        if guard.nlink == 0 {
+            return Err(Error::NotFound);
+        }
+
         if dir_inode.is_full() {
             return Err(Error::OutOfSpace);
         }
@@ -309,9 +315,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let mut guard = guard.upgrade(self.0.clone());
         let mut dir_inode = guard.as_dir_mut()?;
-        if dir_inode.nlink == 0 {
-            return Err(Error::NotFound);
-        }
 
         dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
@@ -340,9 +343,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let mut parent_dir = parent_guard.as_dir_mut()?;
 
         let mut child_guard = child_inode.write(self.0.clone());
-        if child_guard.nlink == 0 {
-            return Err(Error::NotFound);
-        }
 
         parent_dir.insert_dirent(&self.0, &child_dirent)?;
         parent_dir.size = parent_dir.size.checked_add(1).unwrap();
@@ -369,28 +369,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
-        let parent_guard = inode.upgradable_read();
+        let parent_guard = inode.write(self.0.clone());
+        let mut child_inode = None;
 
-        let parent_dir = parent_guard.as_dir()?;
+        let precheck = |dirent: &DiskDirEntry| {
+            dirent
+                .kind()
+                .filter(|&t| t != InodeType::Directory)
+                .map(|_| Error::IsNotDirectory)
+        };
 
-        let (block_num, offset, mut block) = parent_dir.lookup(&self.0, name)?;
-        let dirent = &block.0[offset];
-        if dirent.kind() != Some(InodeType::Directory) {
-            return Err(Error::IsNotDirectory);
-        }
-
-        let child_index = self
-            .0
-            .inodes
-            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
-        let child_inode = self.0.inodes.get_handle(child_index, &self.0.device)?;
-        let mut parent_guard = parent_guard.upgrade(self.0.clone());
-        let mut parent_dir = parent_guard.as_dir_mut()?;
-
-        let open_counter = self.0.open_counter.lock();
-        let still_open = open_counter.is_open(child_inode.index());
-        let mut child_guard = child_inode.write(self.0.clone());
-        drop(open_counter);
+        let (still_open, mut child_guard) =
+            self.unlink_from_dir(parent_guard, name, precheck, &mut child_inode)?;
 
         if child_guard.nlink == 0 {
             return Err(Error::NotFound);
@@ -415,13 +405,6 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             .inodes
             .free_data_blocks(&mut child_guard, &self.0.alloc, &self.0.device)?;
         child_guard.size = 0;
-        child_guard.nlink = 1;
-        parent_dir.nlink -= 1;
-
-        // Remove the directory entry in the parent
-        block.0[offset] = DiskDirEntry::zeroed();
-        parent_dir.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
-        parent_dir.size -= 1;
         child_guard.nlink = 0;
 
         if !still_open {
@@ -440,44 +423,24 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
-        let guard = inode.upgradable_read();
+        let guard = inode.write(self.0.clone());
+        let mut child_inode = None;
 
-        let dir_inode = guard.as_dir()?;
+        let precheck = |dirent: &DiskDirEntry| {
+            dirent
+                .kind()
+                .filter(|&t| t == InodeType::Directory)
+                .map(|_| Error::IsDirectory)
+        };
 
-        let (block_num, offset, mut block) = dir_inode.lookup(&self.0, name)?;
-        let dirent = &block.0[offset];
-        if dirent.kind() == Some(InodeType::Directory) {
-            return Err(Error::IsDirectory);
-        }
-
-        let child_index = self
-            .0
-            .inodes
-            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
-        let child_inode = self.0.inodes.get_handle(child_index, &self.0.device)?;
-        let mut guard = guard.upgrade(self.0.clone());
-        let mut dir_inode = guard.as_dir_mut()?;
-
-        let open_counter = self.0.open_counter.lock();
-        let still_open = open_counter.is_open(child_inode.index());
-        let mut child_guard = child_inode.write(self.0.clone());
-        drop(open_counter);
+        let (still_open, mut child_guard) =
+            self.unlink_from_dir(guard, name, precheck, &mut child_inode)?;
 
         if child_guard.nlink == 0 {
-            log::error!("Double unlink on {child_index:?}");
+            log::error!("Double unlink on {:?}", child_guard.index());
             return Err(Error::Invalid);
         }
-
-        if dir_inode.size == 0 {
-            log::error!("Invalid directory size in {parent_inode:?}");
-            return Err(Error::Invalid);
-        }
-
-        dir_inode.size -= 1;
         child_guard.nlink -= 1;
-
-        block.0[offset] = DiskDirEntry::zeroed();
-        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
 
         if child_guard.nlink == 0 && !still_open {
             self.0
@@ -486,14 +449,134 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         } else if child_guard.nlink == 0 {
             log::info!(
                 "{:?} was unlinked and will be freed on close",
-                dir_inode.index()
+                child_guard.index()
             );
         } else {
             log::info!(
                 "{:?} unlink, still {} reference counts",
-                dir_inode.index(),
+                child_guard.index(),
                 child_guard.nlink
             );
+        }
+
+        Ok(())
+    }
+
+    fn unlink_from_dir<'a>(
+        &self,
+        mut guard: InodeHandleWrite<D>,
+        name: &[u8],
+        precheck: impl FnOnce(&DiskDirEntry) -> Option<Error>,
+        out_child_handle: &'a mut Option<InodeHandle>,
+    ) -> Result<(bool, InodeHandleWrite<'a, D>), Error> {
+        let mut dir_inode = guard.as_dir_mut()?;
+
+        let (block_num, offset, mut block) = dir_inode.as_ref().lookup(&self.0, name)?;
+        let dirent = &block.0[offset];
+
+        if let Some(error) = precheck(dirent) {
+            return Err(error);
+        }
+
+        let child_index = self
+            .0
+            .inodes
+            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
+        let child_inode =
+            out_child_handle.insert(self.0.inodes.get_handle(child_index, &self.0.device)?);
+
+        let open_counter = self.0.open_counter.lock();
+        let still_open = open_counter.is_open(child_inode.index());
+        let child_guard = child_inode.write(self.0.clone());
+        drop(open_counter);
+
+        if child_guard.is_kind(InodeType::Directory)? && child_guard.nlink > 2 {
+            return Err(Error::NotEmpty);
+        }
+
+        if dir_inode.size == 0 {
+            log::error!("Invalid directory size in {:?}", guard.index());
+            return Err(Error::Invalid);
+        }
+
+        block.0[offset] = DiskDirEntry::zeroed();
+        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
+
+        dir_inode.size -= 1;
+
+        // ".." link to parent
+        if child_guard.is_kind(InodeType::Directory)? {
+            dir_inode.nlink -= 1;
+        }
+
+        Ok((still_open, child_guard))
+    }
+
+    fn rename_in_dir(
+        &self,
+        inode_handle: InodeHandle,
+        src_name: &[u8],
+        dst_name: &[u8],
+    ) -> Result<(), Error> {
+        let guard = inode_handle.upgradable_read();
+
+        self.create_check(&guard, dst_name)?;
+        let mut guard = guard.upgrade(self.0.clone());
+        let mut dir_inode = guard.as_dir_mut()?;
+
+        let (block_num, offset, mut block) = dir_inode.as_ref().lookup(&self.0, src_name)?;
+        block.0[offset].set_name(dst_name)?;
+        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(block.deref()))?;
+
+        Ok(())
+    }
+
+    pub fn rename(
+        &self,
+        src: u64,
+        src_name: &[u8],
+        dst: u64,
+        dst_name: &[u8],
+    ) -> Result<(), Error> {
+        if src_name.len() > MAX_FILENAME_LENGTH || dst_name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        let src_inode = self.0.inodes.inode_index_from_u64(src)?;
+        let src_handle = self.0.inodes.get_handle(src_inode, &self.0.device)?;
+        if src == dst {
+            return self.rename_in_dir(src_handle, src_name, dst_name);
+        }
+
+        let dst_inode = self.0.inodes.inode_index_from_u64(dst)?;
+        let dst_handle = self.0.inodes.get_handle(dst_inode, &self.0.device)?;
+
+        // Normally we lock from parent to child, the relationship between src and dst here is not
+        // obvious and is dynamic, so this needs a special locking procedure.
+        let Some((src_guard, dst_guard)) =
+            InodeHandleUpgradableRead::lock_two(&src_handle, &dst_handle)
+        else {
+            return Err(Error::Invalid);
+        };
+
+        self.create_check(&dst_guard, dst_name)?;
+        let src_guard = src_guard.upgrade(self.0.clone());
+
+        let mut movee_handle = None;
+
+        let (_, movee_guard) =
+            self.unlink_from_dir(src_guard, src_name, |_| None, &mut movee_handle)?;
+
+        let mut dst_guard = dst_guard.upgrade(self.0.clone());
+        let mut dst_dir = dst_guard.as_dir_mut()?;
+        let dirent = DiskDirEntry::for_inode(&movee_guard, dst_name)?;
+        dst_dir.insert_dirent(&self.0, &dirent)?;
+
+        if movee_guard.is_kind(InodeType::Directory)? {
+            dst_dir.nlink += 1;
+            let (block_num, offset, mut block) = dst_dir.as_ref().lookup(&self.0, b"..")?;
+            block.0[offset].set_inode(dst_dir.index());
+            dst_dir.write_block(&self.0, block_num, bytemuck::must_cast_ref(block.deref()))?;
         }
 
         Ok(())
