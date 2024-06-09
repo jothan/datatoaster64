@@ -174,7 +174,7 @@ impl<'inode> InodeReference for DirectoryInode<'inode> {
 
 impl<'inode> DirectoryInode<'inode> {
     pub(crate) fn new<H: InodeHolder + ?Sized>(holder: &'inode H) -> Result<Self, Error> {
-        holder.deref().assert_is_directory()?;
+        holder.deref().ensure_is_directory()?;
         Ok(DirectoryInode(holder.index(), holder.deref()))
     }
 
@@ -321,7 +321,7 @@ impl<'inode> DerefMut for DirectoryInodeMut<'inode> {
 
 impl<'inode> DirectoryInodeMut<'inode> {
     pub(crate) fn new<H: InodeHolderMut + ?Sized>(holder: &'inode mut H) -> Result<Self, Error> {
-        holder.assert_is_directory()?;
+        holder.ensure_is_directory()?;
         Ok(DirectoryInodeMut(holder.index(), holder))
     }
 

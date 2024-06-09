@@ -227,11 +227,50 @@ impl Inode {
         f
     }
 
-    pub(crate) fn assert_is_directory(&self) -> Result<(), Error> {
-        if InodeType::try_from(self.kind)? != InodeType::Directory {
-            return Err(Error::NotDirectory);
+    pub(crate) fn is_kind(&self, kind: InodeType) -> Result<bool, Error> {
+        Ok(InodeType::try_from(self.kind)? == kind)
+    }
+
+    pub(crate) fn ensure_kind(&self, kind: InodeType) -> Result<(), Error> {
+        if !self.is_kind(kind)? {
+            return Err(Error::Invalid);
         }
         Ok(())
+    }
+
+    pub(crate) fn ensure_is_file(&self) -> Result<(), Error> {
+        self.ensure_kind(InodeType::File)
+    }
+
+    pub(crate) fn ensure_is_directory(&self) -> Result<(), Error> {
+        self.ensure_kind(InodeType::Directory)
+    }
+
+    pub(crate) fn trim_read_op(&self, position: u64, length: usize) -> Result<usize, Error> {
+        self.ensure_is_file()?;
+        if position > MAX_FILE_SIZE {
+            return Err(Error::OutOfSpace);
+        }
+
+        assert!(self.size <= MAX_FILE_SIZE);
+        let position_end = std::cmp::min(
+            position.checked_add(length.try_into().unwrap()).unwrap(),
+            self.size,
+        );
+        Ok((position_end - position).try_into().unwrap())
+    }
+
+    pub(crate) fn trim_write_op(&self, position: u64, length: usize) -> Result<usize, Error> {
+        self.ensure_is_file()?;
+        if position > MAX_FILE_SIZE {
+            return Err(Error::OutOfSpace);
+        }
+
+        let position_end = std::cmp::min(
+            position.checked_add(length.try_into().unwrap()).unwrap(),
+            MAX_FILE_SIZE,
+        );
+        Ok((position_end - position).try_into().unwrap())
     }
 
     pub(crate) fn read_block<D: BlockAccess<BLOCK_SIZE>>(

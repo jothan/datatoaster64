@@ -7,9 +7,7 @@ use std::sync::Arc;
 use datatoaster_traits::BlockAccess;
 
 use crate::directory::DirectoryInode;
-use crate::inode::{
-    FileBlockIndex, InodeHandle, InodeHolder, InodeIndex, InodeReference, MAX_FILE_SIZE,
-};
+use crate::inode::{FileBlockIndex, InodeHandle, InodeHolder, InodeIndex, InodeReference};
 use crate::{DirEntry, Error, FilesystemInner, BLOCK_SIZE};
 
 pub(crate) struct RawFileHandle<D: BlockAccess<BLOCK_SIZE>> {
@@ -151,31 +149,17 @@ impl<D: BlockAccess<BLOCK_SIZE>> DirectoryHandle<D> {
 pub struct FileHandle<D: BlockAccess<BLOCK_SIZE>>(pub(crate) RawFileHandle<D>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
-    /// Truncate the operation past the end of the file.
-    /// Returns None if the start position is invalid.
-    fn trim_op(position: u64, length: usize) -> Option<usize> {
-        if position > MAX_FILE_SIZE {
-            return None;
-        }
-
-        let position_end = std::cmp::min(
-            position.checked_add(length.try_into().unwrap()).unwrap(),
-            MAX_FILE_SIZE,
-        );
-        Some((position_end - position).try_into().unwrap())
-    }
-
     pub fn pread(&self, position: i64, data: &mut [u8]) -> Result<usize, Error> {
-        let Some(InodeHandle(_, inode)) = self.0.inode() else {
+        let Some(inode) = self.0.inode() else {
             return Err(Error::Invalid);
         };
         let position = position.try_into().unwrap();
-        let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
+        let guard = inode.read();
+        let data_length = guard.trim_read_op(position, data.len())?;
         let data = &mut data[..data_length];
 
         let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
 
-        let guard = inode.read();
         let mut data_remaining = data;
 
         while !data_remaining.is_empty() {
@@ -203,12 +187,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
             return Err(Error::Invalid);
         };
         let position = position.try_into().unwrap();
-        let data_length = Self::trim_op(position, data.len()).ok_or(Error::OutOfSpace)?;
+        let mut guard = inode.write(self.0.fs.clone());
+
+        let data_length = guard.trim_write_op(position, data.len())?;
         let data = &data[..data_length];
 
         let (mut data_block, mut offset) = FileBlockIndex::from_file_position(position)?;
 
-        let mut guard = inode.write(self.0.fs.clone());
         let mut data_remaining = data;
 
         while !data_remaining.is_empty() {
