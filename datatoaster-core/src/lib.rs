@@ -39,8 +39,6 @@ pub use inode::{InodeType, Stat, ROOT_INODE};
 
 #[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum Error {
-    #[snafu(display("General FS failure"))]
-    General,
     #[snafu(display("Invalid FS condition"))]
     Invalid,
     #[snafu(display("Invalid FS device bounds"))]
@@ -63,6 +61,8 @@ pub enum Error {
     IsNotDirectory,
     #[snafu(display("Directory not empty"))]
     NotEmpty,
+    #[snafu(display("Deadlock"))]
+    Deadlock,
     #[snafu(display("Block device error {e}"))]
     Block { e: BlockError },
 }
@@ -86,7 +86,8 @@ impl From<Error> for std::ffi::c_int {
             Error::IsDirectory => libc::EISDIR,
             Error::IsNotDirectory => libc::ENOTDIR,
             Error::NotEmpty => libc::ENOTEMPTY,
-            _ => libc::ENOSYS,
+            Error::Deadlock => libc::EDEADLK,
+            Error::SuperBlock => libc::ENODEV,
         }
     }
 }
@@ -553,11 +554,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         // Normally we lock from parent to child, the relationship between src and dst here is not
         // obvious and is dynamic, so this needs a special locking procedure.
-        let Some((src_guard, dst_guard)) =
-            InodeHandleUpgradableRead::lock_two(&src_handle, &dst_handle)
-        else {
-            return Err(Error::Invalid);
-        };
+        let (src_guard, dst_guard) = InodeHandleUpgradableRead::lock_two(&src_handle, &dst_handle)?;
 
         self.create_check(&dst_guard, dst_name)?;
         let src_guard = src_guard.upgrade(self.0.clone());

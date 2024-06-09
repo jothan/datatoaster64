@@ -376,7 +376,7 @@ impl<'a> InodeHandleUpgradableRead<'a> {
     pub(crate) fn lock_two<'p, 'q>(
         first: &'p InodeHandle,
         second: &'q InodeHandle,
-    ) -> Option<(InodeHandleUpgradableRead<'p>, InodeHandleUpgradableRead<'q>)> {
+    ) -> Result<(InodeHandleUpgradableRead<'p>, InodeHandleUpgradableRead<'q>), Error> {
         for i in 0..16 {
             let first_guard;
             let second_guard;
@@ -389,10 +389,10 @@ impl<'a> InodeHandleUpgradableRead<'a> {
                 second_guard = second.try_upgradable_read();
             }
             if let (Some(first), Some(second)) = (first_guard, second_guard) {
-                return Some((first, second));
+                return Ok((first, second));
             }
         }
-        None
+        Err(Error::Deadlock)
     }
 }
 
