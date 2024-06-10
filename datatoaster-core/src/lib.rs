@@ -177,7 +177,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn opendir(&self, inode_index: u64) -> Result<DirectoryHandle<D>, Error> {
         let inode = self.0.inodes.get_handle_u64(inode_index, &self.0.device)?;
         let guard = inode.read();
-        log::error!("inode: {:?}", guard.deref());
+
         if InodeType::try_from(guard.kind)? != InodeType::Directory {
             return Err(Error::NotDirectory);
         }
