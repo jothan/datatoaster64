@@ -6,8 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "notify")]
 use std::{collections::BTreeMap, path::PathBuf};
 
-use datatoaster_core::{DirectoryHandle, Error, FileHandle, Filesystem, InodeType, BLOCK_SIZE};
-use datatoaster_traits::BlockAccess;
+use datatoaster_core::{
+    BlockAccess, DirectoryHandle, Error, FileHandle, Filesystem, InodeType, BLOCK_SIZE,
+};
 
 use signal_hook::consts::signal::*;
 use signal_hook::iterator::Signals;

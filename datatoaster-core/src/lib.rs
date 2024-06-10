@@ -23,7 +23,8 @@ use layout::DeviceLayout;
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
-use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
+pub use datatoaster_traits;
+pub use datatoaster_traits::{BlockAccess, BlockIndex, Error as BlockError};
 
 mod bitmap;
 mod buffers;
