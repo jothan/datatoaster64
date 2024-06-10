@@ -349,14 +349,35 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         Ok(())
     }
 
-    pub fn link(&self, parent_inode: u64, child_inode: u64, name: &[u8]) -> Result<(), Error> {
+    pub fn link(&self, parent_inode: u64, child_inode: u64, name: &[u8]) -> Result<Stat, Error> {
         DiskDirEntry::check_name(name)?;
 
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let parent_inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
-        let parent_guard = parent_inode.write(self.0.clone());
+        let parent_inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
+        let parent_guard = parent_inode.upgradable_read();
 
-        todo!();
+        let child_inode = self.0.inodes.get_handle_u64(child_inode, &self.0.device)?;
+        let child_guard = child_inode.upgradable_read();
+
+        if !parent_guard.is_kind(InodeType::Directory)? {
+            return Err(Error::IsNotDirectory)?;
+        }
+
+        if child_guard.is_kind(InodeType::Directory)? {
+            return Err(Error::IsDirectory)?;
+        }
+
+        self.create_check(&parent_guard, name)?;
+
+        let mut parent_guard = parent_guard.upgrade(self.0.clone());
+        let mut child_guard = child_guard.upgrade(self.0.clone());
+
+        let mut parent_dir = parent_guard.as_dir_mut()?;
+
+        let dirent = DiskDirEntry::for_inode(&child_guard, name)?;
+        parent_dir.insert_dirent(&self.0, &dirent)?;
+        child_guard.nlink += 1;
+
+        Stat::new(child_inode.index(), &child_guard)
     }
 
     pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {

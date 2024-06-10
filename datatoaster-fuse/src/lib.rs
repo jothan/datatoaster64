@@ -366,6 +366,29 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         }
     }
 
+    fn link(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: fuser::ReplyEntry,
+    ) {
+        let res = self.inner.link(newparent, ino, newname.as_bytes());
+        let res = res.and_then(|r| {
+            self.inner.sync()?;
+            Ok(r)
+        });
+
+        match res {
+            Ok(stat) => {
+                let attr = Stat::from(stat).into();
+                reply.entry(&Duration::new(0, 0), &attr, 0);
+            }
+            Err(e) => reply.error(e.into()),
+        }
+    }
+
     fn unlink(
         &mut self,
         _req: &fuser::Request<'_>,

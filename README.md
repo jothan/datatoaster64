@@ -35,7 +35,7 @@ This small file system takes inspiration from the early UFS and EXT2 file system
 
 ### Supported operations
 
- * file creation, open, read, write, close, rename, unlink
+ * file creation, open, read, write, close, rename, link, unlink
  * mkdir, opendir, readdir, rmdir
 
 ### Features
