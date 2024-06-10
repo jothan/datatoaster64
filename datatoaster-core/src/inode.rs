@@ -5,6 +5,7 @@ use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut, Range};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytemuck::Zeroable;
 use lock_api::ArcRwLockReadGuard;
@@ -18,7 +19,7 @@ use crate::directory::{DirectoryInode, DirectoryInodeMut};
 use crate::{DataBlockIndex, DeviceLayout, Error, FilesystemInner, BLOCK_SIZE};
 
 // FIXME: implement indirect blocks
-pub(crate) const NB_DIRECT_BLOCKS: usize = 61;
+pub(crate) const NB_DIRECT_BLOCKS: usize = 53;
 pub const ROOT_INODE: NonZeroU64 = NonZeroU64::MIN;
 pub(crate) const INODES_PER_BLOCK: usize = BLOCK_SIZE / std::mem::size_of::<Inode>();
 pub(crate) const ROOT_DIRECTORY_INODE: InodeIndex = InodeIndex(ROOT_INODE);
@@ -66,14 +67,6 @@ pub(crate) trait InodeHolder: InodeReference + Deref<Target = Inode> {
 }
 
 impl<T: InodeReference + Deref<Target = Inode>> InodeHolder for T {}
-
-pub(crate) trait InodeHolderMut: InodeHolder + DerefMut {
-    fn as_dir_mut(&mut self) -> Result<DirectoryInodeMut<'_>, Error> {
-        DirectoryInodeMut::new(self)
-    }
-}
-
-impl<T: InodeHolder + DerefMut> InodeHolderMut for T {}
 
 impl InodeReference for InodeHandleRead<'_> {
     fn index(&self) -> InodeIndex {
@@ -208,6 +201,10 @@ impl Stat {
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct Inode {
+    pub(crate) crtime: u128,
+    pub(crate) atime: u128,
+    pub(crate) mtime: u128,
+    pub(crate) ctime: u128,
     // For files: the size in bytes
     // For directories: the number of directory entries
     pub(crate) size: u64,
@@ -294,24 +291,6 @@ impl Inode {
         Ok(Some(unsafe { buffer.assume_init() }))
     }
 
-    pub(crate) fn write_block<D: BlockAccess<BLOCK_SIZE>>(
-        &mut self,
-        fs: &FilesystemInner<D>,
-        block: FileBlockIndex,
-        buffer: &[u8; BLOCK_SIZE],
-    ) -> Result<(), Error> {
-        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
-            data_block
-        } else {
-            let data_block = fs.alloc.lock().alloc(&fs.device)?;
-            self.direct_blocks[block.0] = Some(data_block);
-            data_block
-        };
-
-        fs.device.write(data_block.into(), buffer)?;
-        Ok(())
-    }
-
     pub(crate) fn data_block_iter<'a, D: BlockAccess<BLOCK_SIZE>>(
         &'a self,
         fs: &'a FilesystemInner<D>,
@@ -357,6 +336,7 @@ pub(crate) struct InodeHandleWrite<'a, D> {
     guard: Option<RwLockWriteGuard<'a, Inode>>,
     snapshot: Option<BufferBox<Inode>>,
     fs: Arc<FilesystemInner<D>>,
+    time: Option<Duration>,
 }
 
 impl<'a> Deref for InodeHandleRead<'a> {
@@ -415,6 +395,7 @@ impl<'a, D> InodeHandleWrite<'a, D> {
             guard: Some(guard),
             fs,
             snapshot: None,
+            time: None,
         }
     }
 
@@ -424,11 +405,13 @@ impl<'a, D> InodeHandleWrite<'a, D> {
             .as_ref()
             .is_some_and(|snap| current_value != snap.deref())
         {
+            self.bump_ctime();
             self.fs.inodes.dirty_inode_block(self.index());
             self.snapshot = None;
         } else {
             log::debug!("{:?} is clean", self.index);
         }
+        self.time = None;
     }
 
     #[allow(dead_code)]
@@ -437,6 +420,50 @@ impl<'a, D> InodeHandleWrite<'a, D> {
         self.flush_dirty(guard.deref());
         let guard = RwLockWriteGuard::downgrade(guard);
         InodeHandleRead(self.index, guard)
+    }
+
+    fn get_time(&mut self) -> Duration {
+        *self.time.get_or_insert_with(self.fs.time_source)
+    }
+
+    pub(crate) fn bump_crtime(&mut self) {
+        self.crtime = self.get_time().as_nanos();
+    }
+
+    pub(crate) fn bump_atime(&mut self) {
+        self.atime = self.get_time().as_nanos();
+    }
+
+    pub(crate) fn bump_mtime(&mut self) {
+        self.mtime = self.get_time().as_nanos();
+    }
+
+    pub(crate) fn bump_ctime(&mut self) {
+        self.ctime = self.get_time().as_nanos();
+    }
+}
+
+impl<'a, D: BlockAccess<BLOCK_SIZE>> InodeHandleWrite<'a, D> {
+    pub(crate) fn write_block(
+        &mut self,
+        block: FileBlockIndex,
+        buffer: &[u8; BLOCK_SIZE],
+    ) -> Result<(), Error> {
+        let data_block = if let Some(data_block) = self.direct_blocks[block.0] {
+            data_block
+        } else {
+            let data_block = self.fs.alloc.lock().alloc(&self.fs.device)?;
+            self.direct_blocks[block.0] = Some(data_block);
+            data_block
+        };
+        self.bump_mtime();
+        self.bump_ctime();
+        self.fs.device.write(data_block.into(), buffer)?;
+        Ok(())
+    }
+
+    pub(crate) fn into_dir_mut(self) -> Result<DirectoryInodeMut<'a, D>, Error> {
+        DirectoryInodeMut::new(self)
     }
 }
 

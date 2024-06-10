@@ -7,7 +7,7 @@ use bytemuck::Zeroable;
 use itertools::Itertools;
 
 use crate::buffers::BufferBox;
-use crate::inode::{Inode, InodeHolder, InodeHolderMut, InodeIndex, InodeReference, InodeType};
+use crate::inode::{Inode, InodeHandleWrite, InodeHolder, InodeIndex, InodeReference, InodeType};
 use crate::{
     inode::{FileBlockIndex, NB_DIRECT_BLOCKS},
     BlockAccess, Error, FilesystemInner, BLOCK_SIZE,
@@ -331,30 +331,30 @@ where
     }
 }
 
-pub(crate) struct DirectoryInodeMut<'inode>(InodeIndex, &'inode mut Inode);
+pub(crate) struct DirectoryInodeMut<'inode, D>(InodeIndex, InodeHandleWrite<'inode, D>);
 
-impl<'inode> InodeReference for DirectoryInodeMut<'inode> {
+impl<'inode, D> InodeReference for DirectoryInodeMut<'inode, D> {
     fn index(&self) -> InodeIndex {
         self.0
     }
 }
 
-impl<'inode> Deref for DirectoryInodeMut<'inode> {
-    type Target = Inode;
+impl<'inode, D> Deref for DirectoryInodeMut<'inode, D> {
+    type Target = InodeHandleWrite<'inode, D>;
 
     fn deref(&self) -> &Self::Target {
-        self.1
+        &self.1
     }
 }
 
-impl<'inode> DerefMut for DirectoryInodeMut<'inode> {
+impl<'inode, D> DerefMut for DirectoryInodeMut<'inode, D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.1
+        &mut self.1
     }
 }
 
-impl<'inode> DirectoryInodeMut<'inode> {
-    pub(crate) fn new<H: InodeHolderMut + ?Sized>(holder: &'inode mut H) -> Result<Self, Error> {
+impl<'inode, D: BlockAccess<BLOCK_SIZE>> DirectoryInodeMut<'inode, D> {
+    pub(crate) fn new(holder: InodeHandleWrite<'inode, D>) -> Result<Self, Error> {
         holder.ensure_is_directory()?;
         Ok(DirectoryInodeMut(holder.index(), holder))
     }
@@ -363,7 +363,7 @@ impl<'inode> DirectoryInodeMut<'inode> {
         DirectoryInode(self.index(), self.deref())
     }
 
-    pub(crate) fn insert_dirent<D: BlockAccess<BLOCK_SIZE>>(
+    pub(crate) fn insert_dirent(
         &mut self,
         fs: &FilesystemInner<D>,
         new_dirent: &DiskDirEntry,
@@ -375,12 +375,12 @@ impl<'inode> DirectoryInodeMut<'inode> {
             let mut block_data = DirEntryBlock::zeroed();
             block_data.0[0] = *new_dirent;
 
-            self.write_block(fs, new_block, bytemuck::must_cast_ref(&block_data))?;
+            self.write_block(new_block, bytemuck::must_cast_ref(&block_data))?;
         } else {
             // Insert into an existing block
             let (block_num, offset, mut block_data) = self.as_ref().free_slot(fs)?;
             block_data.0[offset] = *new_dirent;
-            self.write_block(fs, block_num, bytemuck::must_cast_ref(&*block_data))?;
+            self.write_block(block_num, bytemuck::must_cast_ref(&*block_data))?;
         }
 
         Ok(())

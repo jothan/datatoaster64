@@ -204,7 +204,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
 
             if let Ok(op_data) = op_data.try_into() {
                 log::debug!("{:?} full write to {data_block:?}", inode.index());
-                guard.write_block(&self.0.fs, data_block, op_data)?;
+                guard.write_block(data_block, op_data)?;
             } else {
                 let mut buffer = if let Some(buffer) = guard.read_block(&self.0.fs, data_block)? {
                     log::debug!(
@@ -225,7 +225,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FileHandle<D> {
                 };
 
                 buffer[offset..offset + op_data.len()].copy_from_slice(op_data);
-                guard.write_block(&self.0.fs, data_block, &buffer)?;
+                guard.write_block(data_block, &buffer)?;
             }
 
             if !data_remaining.is_empty() {

@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "notify")]
 use std::{collections::BTreeMap, path::PathBuf};
@@ -34,6 +34,14 @@ macro_rules! key64 {
 key64!(FileKey);
 key64!(DirKey);
 
+fn time_source() -> Duration {
+    // Count seconds since the invention of undefined behaviour.
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
 pub struct FuseFilesystem<D: BlockAccess<BLOCK_SIZE>> {
     inner: Filesystem<D>,
     open_files: SlotMap<FileKey, FileHandle<D>>,
@@ -53,7 +61,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FuseFilesystem<D> {
 
         #[allow(unused_mut)]
         let mut fs = Self {
-            inner: Filesystem::mount(device)?,
+            inner: Filesystem::mount(device, &time_source)?,
             open_files: SlotMap::with_key(),
             open_dirs: SlotMap::with_key(),
             #[cfg(feature = "notify")]

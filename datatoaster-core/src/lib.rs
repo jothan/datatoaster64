@@ -5,15 +5,16 @@ extern crate no_std_compat as std;
 use std::prelude::v1::*;
 
 use std::num::NonZeroU64;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytemuck::Zeroable;
 
 use filehandle::{OpenCounter, RawFileHandle};
 use inode::{
     FileBlockIndex, InodeHandle, InodeHandleUpgradableRead, InodeHandleWrite, InodeHolder,
-    InodeHolderMut, InodeReference,
+    InodeReference,
 };
 use layout::DeviceLayout;
 use snafu::prelude::*;
@@ -117,11 +118,17 @@ pub(crate) struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
     inodes: InodeAllocator,
     open_counter: Mutex<OpenCounter>,
+    time_source: &'static (dyn Fn() -> Duration + Sync),
     device: D,
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
-    pub fn new(device: D, sb: SuperBlock) -> Result<Self, Error> {
+    pub fn new(
+        device: D,
+        time_source: &'static (dyn Fn() -> Duration + Sync),
+    ) -> Result<Self, Error> {
+        let sb = SuperBlock::read(&device)?;
+
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
 
@@ -141,6 +148,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
             inodes,
             open_counter: Mutex::new(OpenCounter::default()),
             device,
+            time_source,
         })
     }
 
@@ -157,10 +165,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
 pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
-    pub fn mount(device: D) -> Result<Self, Error> {
-        let sb = SuperBlock::read(&device)?;
-
-        Ok(Filesystem(Arc::new(FilesystemInner::new(device, sb)?)))
+    pub fn mount(
+        device: D,
+        time_source: &'static (dyn Fn() -> Duration + Sync),
+    ) -> Result<Self, Error> {
+        Ok(Filesystem(Arc::new(FilesystemInner::new(
+            device,
+            time_source,
+        )?)))
     }
 
     pub fn sync(&self) -> Result<(), Error> {
@@ -250,8 +262,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let new_inode = self.0.inodes.alloc(self.0.clone(), &new_inode_value)?;
         let new_dirent = DiskDirEntry::new_file(new_inode.index(), name)?;
 
-        let mut guard = guard.upgrade(self.0.clone());
-        let mut dir_inode = guard.as_dir_mut()?;
+        let guard = guard.upgrade(self.0.clone());
+        let mut dir_inode = guard.into_dir_mut()?;
 
         dir_inode.insert_dirent(&self.0, &new_dirent)?;
         dir_inode.size = dir_inode.size.checked_add(1).unwrap();
@@ -259,6 +271,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         new_inode_guard.nlink = 1;
 
         let stat = Stat::new(new_inode.index(), &new_inode_guard)?;
+        new_inode_guard.bump_atime();
+        new_inode_guard.bump_mtime();
+        new_inode_guard.bump_crtime();
         drop(new_inode_guard);
 
         let fh = self.open(new_inode.index().into())?;
@@ -275,8 +290,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let child_inode = self.0.inodes.alloc(self.0.clone(), &new_inode_value)?;
         let child_dirent = DiskDirEntry::new_directory(child_inode.index(), name)?;
 
-        let mut parent_guard = guard.upgrade(self.0.clone());
-        let mut parent_dir = parent_guard.as_dir_mut()?;
+        let parent_guard = guard.upgrade(self.0.clone());
+        let mut parent_dir = parent_guard.into_dir_mut()?;
 
         let mut child_guard = child_inode.write(self.0.clone());
 
@@ -284,16 +299,19 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         parent_dir.size = parent_dir.size.checked_add(1).unwrap();
         child_guard.nlink += 1;
 
-        let block = DirEntryBlock::new_first_block(child_guard.index(), parent_guard.index());
+        let block = DirEntryBlock::new_first_block(child_guard.index(), parent_dir.index());
 
         child_guard.write_block(
-            &self.0,
             FileBlockIndex::FIRST,
             bytemuck::must_cast_ref(block.deref()),
         )?;
         child_guard.size = 2;
         child_guard.nlink += 1;
-        parent_guard.nlink = parent_guard.nlink.checked_add(1).unwrap();
+        child_guard.bump_atime();
+        child_guard.bump_mtime();
+        child_guard.bump_crtime();
+
+        parent_dir.nlink = parent_dir.nlink.checked_add(1).unwrap();
 
         Stat::new(child_guard.index(), &child_guard)
     }
@@ -368,10 +386,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
         self.create_check(&parent_guard, name)?;
 
-        let mut parent_guard = parent_guard.upgrade(self.0.clone());
+        let parent_guard = parent_guard.upgrade(self.0.clone());
         let mut child_guard = child_guard.upgrade(self.0.clone());
 
-        let mut parent_dir = parent_guard.as_dir_mut()?;
+        let mut parent_dir = parent_guard.into_dir_mut()?;
 
         let dirent = DiskDirEntry::for_inode(&child_guard, name)?;
         parent_dir.insert_dirent(&self.0, &dirent)?;
@@ -425,12 +443,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
 
     fn unlink_from_dir<'a>(
         &self,
-        mut guard: InodeHandleWrite<D>,
+        guard: InodeHandleWrite<D>,
         name: &[u8],
         precheck: impl FnOnce(&DiskDirEntry) -> Option<Error>,
         out_child_handle: &'a mut Option<InodeHandle>,
     ) -> Result<(bool, InodeHandleWrite<'a, D>), Error> {
-        let mut dir_inode = guard.as_dir_mut()?;
+        let mut dir_inode = guard.into_dir_mut()?;
 
         let (block_num, offset, mut block) = dir_inode.as_ref().lookup(&self.0, name)?;
         let dirent = &block.0[offset];
@@ -453,12 +471,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         }
 
         if dir_inode.size == 0 {
-            log::error!("Invalid directory size in {:?}", guard.index());
+            log::error!("Invalid directory size in {:?}", dir_inode.index());
             return Err(Error::Invalid);
         }
 
         block.0[offset] = DiskDirEntry::zeroed();
-        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(&*block))?;
+        dir_inode
+            .deref_mut()
+            .write_block(block_num, bytemuck::must_cast_ref(&*block))?;
 
         dir_inode.size -= 1;
 
@@ -479,12 +499,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let guard = inode_handle.upgradable_read();
 
         self.create_check(&guard, dst_name)?;
-        let mut guard = guard.upgrade(self.0.clone());
-        let mut dir_inode = guard.as_dir_mut()?;
+        let guard = guard.upgrade(self.0.clone());
+        let mut dir_inode = guard.into_dir_mut()?;
 
         let (block_num, offset, mut block) = dir_inode.as_ref().lookup(&self.0, src_name)?;
         block.0[offset].set_name(dst_name)?;
-        dir_inode.write_block(&self.0, block_num, bytemuck::must_cast_ref(block.deref()))?;
+        dir_inode.write_block(block_num, bytemuck::must_cast_ref(block.deref()))?;
 
         Ok(())
     }
@@ -518,8 +538,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         let (_, movee_guard) =
             self.unlink_from_dir(src_guard, src_name, |_| None, &mut movee_handle)?;
 
-        let mut dst_guard = dst_guard.upgrade(self.0.clone());
-        let mut dst_dir = dst_guard.as_dir_mut()?;
+        let dst_guard = dst_guard.upgrade(self.0.clone());
+        let mut dst_dir = dst_guard.into_dir_mut()?;
         let dirent = DiskDirEntry::for_inode(&movee_guard, dst_name)?;
         dst_dir.insert_dirent(&self.0, &dirent)?;
 
@@ -527,7 +547,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             dst_dir.nlink += 1;
             let (block_num, offset, mut block) = dst_dir.as_ref().lookup(&self.0, b"..")?;
             block.0[offset].set_inode(dst_dir.index());
-            dst_dir.write_block(&self.0, block_num, bytemuck::must_cast_ref(block.deref()))?;
+            dst_dir.write_block(block_num, bytemuck::must_cast_ref(block.deref()))?;
         }
 
         Ok(())
