@@ -1,9 +1,10 @@
-#![feature(new_uninit)]
-
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
+
+#[cfg(feature = "notify")]
+use std::{collections::BTreeMap, path::PathBuf};
 
 use datatoaster_core::{DirectoryHandle, Error, FileHandle, Filesystem, InodeType, BLOCK_SIZE};
 use datatoaster_traits::BlockAccess;
@@ -37,16 +38,113 @@ pub struct FuseFilesystem<D: BlockAccess<BLOCK_SIZE>> {
     inner: Filesystem<D>,
     open_files: SlotMap<FileKey, FileHandle<D>>,
     open_dirs: SlotMap<DirKey, DirectoryHandle<D>>,
+    // For notifications: remember what name each inode was used with
+    // (and the parent directory inode).
+    #[cfg(feature = "notify")]
+    file_names: BTreeMap<u64, (u64, Box<OsStr>)>,
+    #[cfg(feature = "notify")]
+    notify: bool,
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> FuseFilesystem<D> {
-    pub fn new(device: D) -> Result<Self, Error> {
+    #[allow(unused_variables)]
+    pub fn new(device: D, notify: bool) -> Result<Self, Error> {
         assert!(fuser::FUSE_ROOT_ID == datatoaster_core::ROOT_INODE.get());
-        Ok(Self {
+
+        #[allow(unused_mut)]
+        let mut fs = Self {
             inner: Filesystem::mount(device)?,
             open_files: SlotMap::with_key(),
             open_dirs: SlotMap::with_key(),
-        })
+            #[cfg(feature = "notify")]
+            file_names: Default::default(),
+            #[cfg(feature = "notify")]
+            notify,
+        };
+
+        #[cfg(feature = "notify")]
+        if fs.notify {
+            fs.notify_init();
+        }
+
+        Ok(fs)
+    }
+
+    #[cfg(feature = "notify")]
+    fn inode_to_name(&self, mut ino: u64) -> Box<Path> {
+        let mut segments = Vec::<&OsStr>::new();
+        loop {
+            let Some((parent, name)) = self.file_names.get(&ino) else {
+                break;
+            };
+            segments.push(name);
+            ino = *parent;
+        }
+
+        if segments.is_empty() {
+            segments.push(OsStrExt::from_bytes(
+                b"?? a file with no name (with no horse)??",
+            ));
+        }
+
+        segments.iter().rev().collect::<PathBuf>().into_boxed_path()
+    }
+
+    #[cfg(feature = "notify")]
+    fn notify_init(&mut self) {
+        if !self.notify {
+            return;
+        }
+
+        if let Err(e) = libnotify::init("datatoaster-fuse") {
+            log::error!("Could not initialize libnotify: {e:?}");
+            self.notify = false;
+        }
+    }
+
+    #[cfg(feature = "notify")]
+    fn notify_open(&self, _ino: u64) {
+        if !self.notify {
+            return;
+        }
+
+        let file_name = self.inode_to_name(_ino);
+        let notification = libnotify::Notification::new(
+            format!("{file_name:?} was opened").as_str(),
+            "Just so you know",
+            "drive-harddisk",
+        );
+        notification.set_category("device.added");
+
+        if let Err(e) = notification.show() {
+            log::error!("Notify error: {e:?}");
+        }
+    }
+
+    #[cfg(feature = "notify")]
+    fn notify_closed(&self, _ino: u64) {
+        if !self.notify {
+            return;
+        }
+
+        let file_name = self.inode_to_name(_ino);
+        let notification = libnotify::Notification::new(
+            format!("{file_name:?} was closed").as_str(),
+            "You might want to check that the lid is screwed on properly.",
+            "face-worried",
+        );
+        notification.set_category("device.removed");
+
+        if let Err(e) = notification.show() {
+            log::error!("Notify error: {e:?}");
+        }
+    }
+
+    #[cfg(feature = "notify")]
+    fn record_name(&mut self, ino: u64, parent_ino: u64, name: &OsStr) {
+        if self.notify {
+            self.file_names.insert(ino, (parent_ino, name.into()));
+        }
     }
 }
 
@@ -108,6 +206,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         };
 
         let res = handle.close().and_then(|_| self.inner.sync());
+
+        #[cfg(feature = "notify")]
+        self.notify_closed(_ino);
 
         match res {
             Ok(_) => reply.ok(),
@@ -182,7 +283,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
         reply: fuser::ReplyEntry,
     ) {
         match self.inner.lookup(parent, name.as_bytes()) {
-            Ok(stat) => reply.entry(&Duration::new(0, 0), &Stat::from(stat).into(), 0),
+            Ok(stat) => {
+                let attr = Stat::from(stat).into();
+                reply.entry(&Duration::new(0, 0), &attr, 0);
+
+                #[cfg(feature = "notify")]
+                self.record_name(attr.ino, parent, name);
+            }
             Err(e) => reply.error(e.into()),
         }
     }
@@ -217,7 +324,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
             Ok(handle) => {
                 let fh = self.open_files.insert(handle).into();
                 log::debug!("OPEN fh {fh}");
-                reply.opened(fh, 0)
+                reply.opened(fh, 0);
+
+                #[cfg(feature = "notify")]
+                self.notify_open(ino);
             }
             Err(e) => reply.error(e.into()),
         }
@@ -244,7 +354,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
                 let attr = Stat::from(stat).into();
                 let fh = self.open_files.insert(handle).into();
                 log::debug!("CREATE fh {fh}");
-                reply.created(&Duration::new(0, 0), &attr, 0, fh, 0)
+                reply.created(&Duration::new(0, 0), &attr, 0, fh, 0);
+
+                #[cfg(feature = "notify")]
+                self.record_name(attr.ino, parent, name);
             }
             Err(e) => {
                 log::error!("CREATE error: {e:?}");
@@ -287,6 +400,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
             Ok(stat) => {
                 let attr = Stat::from(stat).into();
                 reply.entry(&Duration::new(0, 0), &attr, 0);
+
+                #[cfg(feature = "notify")]
+                self.record_name(attr.ino, parent, name);
             }
             Err(e) => {
                 log::error!("MKDIR error: {e:?}");

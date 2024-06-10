@@ -18,6 +18,10 @@ panic = "abort"
 [profile.dev]
 panic = "abort"
 
+[features]
+default = ["notify"]
+notify = ["datatoaster-fuse/notify"]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive", "string"] }
@@ -25,7 +29,6 @@ datatoaster-core = { path = "datatoaster-core" }
 datatoaster-fuse = { path = "datatoaster-fuse" }
 datatoaster-traits = { path = "datatoaster-traits" }
 env_logger = "0.11"
-libnotify = "1.0.3"
 log = "0.4"
 nix = { version = "0.29", features = ["uio"] }
 

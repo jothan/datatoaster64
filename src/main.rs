@@ -14,6 +14,7 @@ use nix::sys::uio::{pread, pwrite};
 struct Args {
     #[arg(long, short, default_value =  OsStr::new("data.toast"))]
     data_path: Box<Path>,
+    #[cfg(feature = "notify")]
     #[arg(short, long)]
     quiet: bool,
     #[command(subcommand)]
@@ -116,11 +117,11 @@ unsafe impl BlockAccess<BLOCK_SIZE> for FileDevice {
     }
 }
 
-fn mount_device(path: Box<Path>, mountpoint: Box<Path>) -> anyhow::Result<()> {
+fn mount_device(path: Box<Path>, mountpoint: Box<Path>, notify: bool) -> anyhow::Result<()> {
     log::info!("Opening {path:?}");
     let device = FileDevice::open_for_mount(path)?;
     log::info!("Opening file system");
-    let fs = FuseFilesystem::new(device)?;
+    let fs = FuseFilesystem::new(device, notify)?;
 
     log::info!("File system started at {mountpoint:?}, waiting for Ctrl-C");
     fs.run(mountpoint, &[MountOption::FSName("datatoaster64".into())])?;
@@ -140,8 +141,13 @@ fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
+    #[cfg(feature = "notify")]
+    let notify = !args.quiet;
+    #[cfg(not(feature = "notify"))]
+    let notify = false;
+
     match args.command {
-        Command::Mount { mountpoint } => mount_device(args.data_path, mountpoint)?,
+        Command::Mount { mountpoint } => mount_device(args.data_path, mountpoint, notify)?,
         Command::Format { device_size_mb } => format_device(args.data_path, device_size_mb)?,
     }
 
