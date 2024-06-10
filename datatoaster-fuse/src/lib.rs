@@ -357,7 +357,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> fuser::Filesystem for FuseFilesystem<D> {
                 reply.created(&Duration::new(0, 0), &attr, 0, fh, 0);
 
                 #[cfg(feature = "notify")]
-                self.record_name(attr.ino, parent, name);
+                {
+                    self.record_name(attr.ino, parent, name);
+                    self.notify_open(attr.ino);
+                }
             }
             Err(e) => {
                 log::error!("CREATE error: {e:?}");
