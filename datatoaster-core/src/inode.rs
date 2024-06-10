@@ -562,6 +562,14 @@ impl InodeAllocator {
         }
     }
 
+    pub(crate) fn get_handle_u64<D: BlockAccess<BLOCK_SIZE>>(
+        &self,
+        index: u64,
+        device: &D,
+    ) -> Result<InodeHandle, Error> {
+        self.get_handle(self.inode_index_from_u64(index)?, device)
+    }
+
     pub(crate) fn get_handle<D: BlockAccess<BLOCK_SIZE>>(
         &self,
         index: InodeIndex,

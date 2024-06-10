@@ -168,8 +168,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     pub fn stat(&self, inode_index: u64) -> Result<Stat, Error> {
-        let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
-        let inode = self.0.inodes.get_handle(inode_index, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(inode_index, &self.0.device)?;
         let guard = inode.read();
 
         Stat::new(guard.index(), &guard)
@@ -206,8 +205,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn lookup(&self, parent_inode: u64, name: &[u8]) -> Result<Stat, Error> {
         DiskDirEntry::check_name(name)?;
 
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
         let guard = inode.read();
 
         let dir_inode = guard.as_dir()?;
@@ -243,8 +241,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         name: &[u8],
         mode: u32,
     ) -> Result<(FileHandle<D>, Stat), Error> {
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
         let guard = inode.upgradable_read();
 
         self.create_check(&guard, name)?;
@@ -269,8 +266,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     pub fn mkdir(&self, parent_inode: u64, name: &[u8], mode: u32) -> Result<Stat, Error> {
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
         let guard = inode.upgradable_read();
 
         self.create_check(&guard, name)?;
@@ -305,8 +301,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn rmdir(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
         DiskDirEntry::check_name(name)?;
 
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
         let parent_guard = inode.write(self.0.clone());
         let mut child_inode = None;
 
@@ -367,8 +362,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
         DiskDirEntry::check_name(name)?;
 
-        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
-        let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let inode = self.0.inodes.get_handle_u64(parent_inode, &self.0.device)?;
         let guard = inode.write(self.0.clone());
         let mut child_inode = None;
 
@@ -424,12 +418,9 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             return Err(error);
         }
 
-        let child_index = self
-            .0
-            .inodes
-            .inode_index_from_u64(dirent.inode().map(NonZeroU64::get).unwrap_or(0))?;
+        let child_index = dirent.inode().map(NonZeroU64::get).unwrap_or(0);
         let child_inode =
-            out_child_handle.insert(self.0.inodes.get_handle(child_index, &self.0.device)?);
+            out_child_handle.insert(self.0.inodes.get_handle_u64(child_index, &self.0.device)?);
 
         let open_counter = self.0.open_counter.lock();
         let still_open = open_counter.is_open(child_inode.index());
@@ -487,14 +478,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         DiskDirEntry::check_name(src_name)?;
         DiskDirEntry::check_name(dst_name)?;
 
-        let src_inode = self.0.inodes.inode_index_from_u64(src)?;
-        let src_handle = self.0.inodes.get_handle(src_inode, &self.0.device)?;
+        let src_handle = self.0.inodes.get_handle_u64(src, &self.0.device)?;
         if src == dst {
             return self.rename_in_dir(src_handle, src_name, dst_name);
         }
 
-        let dst_inode = self.0.inodes.inode_index_from_u64(dst)?;
-        let dst_handle = self.0.inodes.get_handle(dst_inode, &self.0.device)?;
+        let dst_handle = self.0.inodes.get_handle_u64(dst, &self.0.device)?;
 
         // Normally we lock from parent to child, the relationship between src and dst here is not
         // obvious and is dynamic, so this needs a special locking procedure.
