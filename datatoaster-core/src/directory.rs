@@ -90,6 +90,17 @@ impl DiskDirEntry {
     pub(crate) fn set_inode(&mut self, index: InodeIndex) {
         self.inode = index.into();
     }
+
+    pub(crate) fn check_name(name: &[u8]) -> Result<(), Error> {
+        if name.len() > MAX_FILENAME_LENGTH {
+            return Err(Error::NameTooLong);
+        }
+
+        if name.contains(&b'/') || name.contains(&0) {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

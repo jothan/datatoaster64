@@ -9,6 +9,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
+
 use filehandle::{OpenCounter, RawFileHandle};
 use inode::{
     FileBlockIndex, InodeHandle, InodeHandleUpgradableRead, InodeHandleWrite, InodeHolder,
@@ -203,9 +204,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     pub fn lookup(&self, parent_inode: u64, name: &[u8]) -> Result<Stat, Error> {
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
+        DiskDirEntry::check_name(name)?;
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
@@ -218,14 +217,12 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         self.stat(dirent.inode().unwrap().get())
     }
 
-    fn create_check(&self, guard: &InodeHandleUpgradableRead, name: &[u8]) -> Result<(), Error> {
+    fn create_check<H: InodeHolder>(&self, guard: &H, name: &[u8]) -> Result<(), Error> {
+        DiskDirEntry::check_name(name)?;
+
         let dir_inode = guard.as_dir()?;
 
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
-
-        if guard.nlink == 0 {
+        if dir_inode.nlink == 0 {
             return Err(Error::NotFound);
         }
 
@@ -306,9 +303,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     pub fn rmdir(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
+        DiskDirEntry::check_name(name)?;
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
@@ -359,10 +354,18 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         Ok(())
     }
 
+    pub fn link(&self, parent_inode: u64, child_inode: u64, name: &[u8]) -> Result<(), Error> {
+        DiskDirEntry::check_name(name)?;
+
+        let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
+        let parent_inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
+        let parent_guard = parent_inode.write(self.0.clone());
+
+        todo!();
+    }
+
     pub fn unlink(&self, parent_inode: u64, name: &[u8]) -> Result<(), Error> {
-        if name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
+        DiskDirEntry::check_name(name)?;
 
         let parent_inode = self.0.inodes.inode_index_from_u64(parent_inode)?;
         let inode = self.0.inodes.get_handle(parent_inode, &self.0.device)?;
@@ -481,9 +484,8 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         dst: u64,
         dst_name: &[u8],
     ) -> Result<(), Error> {
-        if src_name.len() > MAX_FILENAME_LENGTH || dst_name.len() > MAX_FILENAME_LENGTH {
-            return Err(Error::NameTooLong);
-        }
+        DiskDirEntry::check_name(src_name)?;
+        DiskDirEntry::check_name(dst_name)?;
 
         let src_inode = self.0.inodes.inode_index_from_u64(src)?;
         let src_handle = self.0.inodes.get_handle(src_inode, &self.0.device)?;
