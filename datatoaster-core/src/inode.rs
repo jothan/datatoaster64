@@ -159,6 +159,10 @@ pub struct Stat {
     pub blksize: u32,
     pub blocks: u64,
     pub size: u64,
+    pub crtime: Duration,
+    pub ctime: Duration,
+    pub mtime: Duration,
+    pub atime: Duration,
 }
 
 impl Stat {
@@ -194,8 +198,18 @@ impl Stat {
             blksize,
             blocks,
             size,
+            crtime: u128_duration(inode.crtime),
+            ctime: u128_duration(inode.ctime),
+            mtime: u128_duration(inode.mtime),
+            atime: u128_duration(inode.atime),
         })
     }
+}
+
+fn u128_duration(nanos: u128) -> Duration {
+    let seconds = nanos / 1_000_000_000;
+    let nanos = nanos % 1_000_000_000;
+    Duration::new(seconds as u64, nanos as u32)
 }
 
 #[derive(bytemuck::Zeroable, bytemuck::Pod, Clone, Copy, Debug, PartialEq, Eq)]
