@@ -3,7 +3,7 @@ use std::prelude::v1::*;
 use datatoaster_traits::BlockAccess;
 
 use super::inode::InodeIndex;
-use crate::{buffers::BlockBuffer, BlockIndex, Error, BLOCK_SIZE};
+use crate::{buffers::BlockBuffer, BlockIndex, DeviceLayout, Error, BLOCK_SIZE};
 
 const MAGIC: u64 = 0x90d18c516db2bce7;
 const ENDIAN_CHECK: u64 = 0x0807060504030201;
@@ -14,14 +14,22 @@ pub(crate) struct SuperBlock {
     magic: u64,
     endian_check: u64,
     root_directory: Option<InodeIndex>,
+    pub(crate) device_blocks: u64,
+    pub(crate) inodes_blocks: u64,
+    pub(crate) bitmap_blocks: u64,
+    pub(crate) data_blocks: u64,
 }
 
 impl SuperBlock {
-    pub(crate) fn new(root_directory: InodeIndex) -> Self {
+    pub(crate) fn new(root_directory: InodeIndex, layout: &DeviceLayout) -> Self {
         SuperBlock {
             magic: MAGIC,
             endian_check: ENDIAN_CHECK,
             root_directory: Some(root_directory),
+            device_blocks: layout.data_blocks.end.0,
+            inodes_blocks: layout.nb_inode_blocks(),
+            bitmap_blocks: layout.nb_bitmap_blocks(),
+            data_blocks: layout.nb_data_blocks(),
         }
     }
 

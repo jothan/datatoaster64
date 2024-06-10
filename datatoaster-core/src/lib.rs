@@ -6,7 +6,6 @@ use std::prelude::v1::*;
 
 use std::num::NonZeroU64;
 use std::ops::Deref;
-use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
@@ -15,6 +14,7 @@ use inode::{
     FileBlockIndex, InodeHandle, InodeHandleUpgradableRead, InodeHandleWrite, InodeHolder,
     InodeHolderMut, InodeReference,
 };
+use layout::DeviceLayout;
 use snafu::prelude::*;
 use spin::lock_api::Mutex;
 
@@ -25,11 +25,12 @@ mod buffers;
 mod directory;
 mod filehandle;
 mod inode;
+mod layout;
 mod superblock;
 
 use crate::bitmap::{BitmapAllocator, BitmapBitIndex};
 use crate::directory::{DirEntryBlock, DiskDirEntry};
-use crate::inode::{Inode, InodeAllocator, RawInodeBlock, INODES_PER_BLOCK, ROOT_DIRECTORY_INODE};
+use crate::inode::{Inode, InodeAllocator, RawInodeBlock, ROOT_DIRECTORY_INODE};
 use superblock::SuperBlock;
 
 pub const BLOCK_SIZE: usize = 4096;
@@ -111,73 +112,6 @@ impl From<DataBlockIndex> for BlockIndex {
     }
 }
 
-/// Disk data layout:
-/// superblock
-/// inode blocks
-/// bitmap blocks
-/// data blocks
-
-#[derive(Clone, Debug)]
-pub struct DeviceLayout {
-    pub nb_inodes: u64,
-    pub inode_blocks: Range<BlockIndex>,
-    pub bitmap_blocks: Range<BlockIndex>,
-    pub data_blocks: Range<BlockIndex>,
-}
-
-impl DeviceLayout {
-    const MIN_BLOCKS: BlockIndex = BlockIndex(64);
-    const INODE_RATIO: u64 = 16384; // bytes per inode
-
-    fn new(total_blocks: BlockIndex) -> Result<Self, Error> {
-        if total_blocks < Self::MIN_BLOCKS {
-            return Err(Error::DeviceBounds);
-        }
-        // Substract superblock.
-        let nb_data_and_metadata_blocks = total_blocks.0 - 1;
-        let device_bytes = total_blocks
-            .0
-            .checked_mul(BLOCK_SIZE.try_into().unwrap())
-            .ok_or(Error::DeviceBounds)?;
-        let nb_inodes = device_bytes / Self::INODE_RATIO;
-        let nb_inode_blocks = nb_inodes.div_ceil(INODES_PER_BLOCK.try_into().unwrap());
-        // Use all the space in the inode blocks
-        let nb_inodes = nb_inode_blocks * (u64::try_from(INODES_PER_BLOCK).unwrap());
-
-        let nb_data_and_bitmap_blocks = nb_data_and_metadata_blocks
-            .checked_sub(nb_inode_blocks)
-            .ok_or(Error::DeviceBounds)?;
-        let nb_bitmap_blocks: u64 =
-            nb_data_and_bitmap_blocks.div_ceil(u64::try_from(BLOCK_SIZE).unwrap() * 8 - 1);
-        let nb_data_blocks = nb_data_and_bitmap_blocks - nb_bitmap_blocks;
-
-        let inode_blocks = BlockIndex(1)..BlockIndex(1 + nb_inode_blocks);
-        let bitmap_blocks =
-            BlockIndex(inode_blocks.end.0)..BlockIndex(inode_blocks.end.0 + nb_bitmap_blocks);
-        let data_blocks =
-            BlockIndex(bitmap_blocks.end.0)..BlockIndex(bitmap_blocks.end.0 + nb_data_blocks);
-
-        assert!(data_blocks.end == total_blocks);
-
-        Ok(Self {
-            nb_inodes,
-            inode_blocks,
-            bitmap_blocks,
-            data_blocks,
-        })
-    }
-
-    pub fn from_device<D: BlockAccess<BLOCK_SIZE>>(device: &D) -> Result<Self, Error> {
-        let blocks = device.device_size()?;
-        Self::new(blocks)
-    }
-
-    pub fn nb_inodes(&self) -> u64 {
-        (self.inode_blocks.end.0 - self.inode_blocks.start.0)
-            * u64::try_from(INODES_PER_BLOCK).unwrap()
-    }
-}
-
 pub(crate) struct FilesystemInner<D> {
     alloc: Mutex<BitmapAllocator>,
     inodes: InodeAllocator,
@@ -186,9 +120,17 @@ pub(crate) struct FilesystemInner<D> {
 }
 
 impl<D: BlockAccess<BLOCK_SIZE>> FilesystemInner<D> {
-    pub fn new(device: D) -> Result<Self, Error> {
+    pub fn new(device: D, sb: SuperBlock) -> Result<Self, Error> {
         let total_blocks = device.device_size()?;
         let layout = DeviceLayout::new(total_blocks)?;
+
+        let disk_layout = DeviceLayout::from_superblock(&sb);
+
+        log::info!("{disk_layout:?}");
+
+        if sb.device_blocks != total_blocks.0 || layout != disk_layout {
+            return Err(Error::SuperBlock);
+        }
 
         let alloc = Mutex::new(BitmapAllocator::new(&layout));
         let inodes = InodeAllocator::new(&layout);
@@ -215,9 +157,9 @@ pub struct Filesystem<D>(Arc<FilesystemInner<D>>);
 
 impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     pub fn mount(device: D) -> Result<Self, Error> {
-        SuperBlock::read(&device)?;
+        let sb = SuperBlock::read(&device)?;
 
-        Ok(Filesystem(Arc::new(FilesystemInner::new(device)?)))
+        Ok(Filesystem(Arc::new(FilesystemInner::new(device, sb)?)))
     }
 
     pub fn sync(&self) -> Result<(), Error> {
@@ -617,7 +559,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         )?;
 
         // Create the superblock
-        let sup = SuperBlock::new(ROOT_DIRECTORY_INODE);
+        let sup = SuperBlock::new(ROOT_DIRECTORY_INODE, &layout);
         sup.write(device)?;
 
         Ok(())

@@ -250,7 +250,8 @@ mod tests {
         let device = DummyDevice {
             size: 256 * 1024 * 1024,
         };
-        let layout = DeviceLayout::from_device(&device)?;
+
+        let layout = DeviceLayout::new(device.device_size()?)?;
         let mut alloc = BitmapAllocator::new(&layout);
 
         for _ in 0..(layout.data_blocks.end.0 - layout.data_blocks.start.0) {
@@ -266,7 +267,7 @@ mod tests {
         let device = DummyDevice {
             size: 256 * 1024 * 1024,
         };
-        let layout = DeviceLayout::from_device(&device)?;
+        let layout = DeviceLayout::new(device.device_size()?)?;
         let mut alloc = BitmapAllocator::new(&layout);
         assert!(alloc.blocks.dirty_blocks.len() == 0);
         let data_block = alloc.alloc(&device)?;
