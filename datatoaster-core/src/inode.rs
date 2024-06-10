@@ -413,13 +413,13 @@ impl<'a, D> InodeHandleWrite<'a, D> {
         }
     }
 
-    fn flush_dirty(&mut self, current_value: &Inode) {
+    fn flush_dirty(&mut self, guard: &mut RwLockWriteGuard<Inode>) {
         if self
             .snapshot
             .as_ref()
-            .is_some_and(|snap| current_value != snap.deref())
+            .is_some_and(|snap| (*guard).deref() != snap.deref())
         {
-            self.bump_ctime();
+            guard.ctime = self.get_time().as_nanos();
             self.fs.inodes.dirty_inode_block(self.index());
             self.snapshot = None;
         } else {
@@ -430,8 +430,8 @@ impl<'a, D> InodeHandleWrite<'a, D> {
 
     #[allow(dead_code)]
     pub(crate) fn downgrade(mut self) -> InodeHandleRead<'a> {
-        let guard = self.guard.take().expect("inode write handle gone");
-        self.flush_dirty(guard.deref());
+        let mut guard = self.guard.take().expect("inode write handle gone");
+        self.flush_dirty(&mut guard);
         let guard = RwLockWriteGuard::downgrade(guard);
         InodeHandleRead(self.index, guard)
     }
@@ -505,8 +505,8 @@ impl<'a, D> DerefMut for InodeHandleWrite<'a, D> {
 
 impl<'a, D> Drop for InodeHandleWrite<'a, D> {
     fn drop(&mut self) {
-        if let Some(guard) = self.guard.take() {
-            self.flush_dirty(guard.deref());
+        if let Some(mut guard) = self.guard.take() {
+            self.flush_dirty(&mut guard);
         }
     }
 }
