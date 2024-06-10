@@ -175,16 +175,13 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
     }
 
     pub fn opendir(&self, inode_index: u64) -> Result<DirectoryHandle<D>, Error> {
-        let inode_index = self.0.inodes.inode_index_from_u64(inode_index)?;
-        let raw = RawFileHandle::open(inode_index, self.0.clone())?;
-
-        let inode = raw.inode().unwrap();
-        let guard = inode.1.read();
-
+        let inode = self.0.inodes.get_handle_u64(inode_index, &self.0.device)?;
+        let guard = inode.read();
+        log::error!("inode: {:?}", guard.deref());
         if InodeType::try_from(guard.kind)? != InodeType::Directory {
             return Err(Error::NotDirectory);
         }
-        drop(guard);
+        let raw = RawFileHandle::open(guard.index(), self.0.clone())?;
         Ok(DirectoryHandle(raw))
     }
 
