@@ -14,6 +14,8 @@ use nix::sys::uio::{pread, pwrite};
 struct Args {
     #[arg(long, short, default_value =  OsStr::new("data.toast"))]
     data_path: Box<Path>,
+    #[arg(short, long)]
+    quiet: bool,
     #[command(subcommand)]
     command: Command,
 }

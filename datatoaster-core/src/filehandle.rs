@@ -44,6 +44,7 @@ impl<D: BlockAccess<BLOCK_SIZE>> RawFileHandle<D> {
         let open_count = open_counter.decrement(inode.0)?;
 
         let guard = inode.upgradable_read();
+        drop(open_counter);
         if guard.nlink == 0 && open_count.is_none() {
             let mut guard = guard.upgrade(self.fs.clone());
             self.fs

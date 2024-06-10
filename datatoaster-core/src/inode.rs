@@ -673,7 +673,6 @@ impl InodeAllocator {
         device: &D,
     ) -> Result<(), Error> {
         log::debug!("free {:?}", inode.index());
-        // FIXME: put a better condition here, make sure directories are empty.
         if inode.is_kind(InodeType::Free)? || inode.nlink != 0 {
             log::error!("invalid free {:?}", inode.index());
             return Err(Error::Invalid);
