@@ -9,6 +9,9 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "std")]
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use bytemuck::Zeroable;
 
 use filehandle::{OpenCounter, RawFileHandle};
@@ -575,6 +578,14 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
             bytemuck::must_cast_ref(root_dir_contents.deref()),
         )?;
 
+        #[cfg(not(feature = "std"))]
+        let now = Duration::new(0, 0).as_nanos();
+        #[cfg(feature = "std")]
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
         // Create the root directory inode
         let mut root_inode = Inode::zeroed();
         root_inode.kind = InodeType::Directory as _;
@@ -582,6 +593,10 @@ impl<D: BlockAccess<BLOCK_SIZE>> Filesystem<D> {
         root_inode.size = 2;
         root_inode.perm = 0x1ed; // 755 octal
         root_inode.direct_blocks[0] = Some(root_dir_data);
+        root_inode.crtime = now;
+        root_inode.ctime = now;
+        root_inode.mtime = now;
+        root_inode.atime = now;
 
         let mut root_inode_block = RawInodeBlock::zeroed();
         root_inode_block.0[0] = root_inode;
