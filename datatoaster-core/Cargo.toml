@@ -14,17 +14,11 @@ datatoaster-traits = { path = "../datatoaster-traits" }
 spin = "0.9.8"
 bytemuck = { version = "1.16.0", features = [
     "extern_crate_alloc",
-    "zeroable_maybe_uninit",
     "min_const_generics",
     "derive",
-    "const_zeroed",
-    "zeroable_atomics",
     "must_cast",
 ] }
-libc = { version = "0.2", default-features = false, features = [
-    "const-extern-fn",
-    "extra_traits",
-] }
+libc = { version = "0.2", default-features = false }
 snafu = { version = "0.8.3", default-features = false, features = ["unstable-core-error", "rust_1_65"] }
 lock_api = { version = "0.4.12", default-features = false, features = ["arc_lock"] }
 itertools = { version = "0.13", default-features = false }

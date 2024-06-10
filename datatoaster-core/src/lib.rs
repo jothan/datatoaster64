@@ -1,5 +1,5 @@
 #![no_std]
-#![feature(new_uninit, maybe_uninit_as_bytes, maybe_uninit_uninit_array_transpose)]
+#![feature(new_uninit)]
 extern crate no_std_compat as std;
 
 use std::prelude::v1::*;
